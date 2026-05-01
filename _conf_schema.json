@@ -1,0 +1,370 @@
+{
+  "default_platform": {
+    "description": "默认AI图像生成平台\n用于指定生成图像时优先使用的AI平台，支持多个平台切换。",
+    "type": "string",
+    "default": "openai",
+    "options": ["openai", "gemini", "grok", "seed", "zhipu", "qianwen", "baidu", "hunyuan", "stable_diffusion"]
+  },
+  "default_size": {
+    "description": "默认图像尺寸\n图像的分辨率大小，不同平台支持的尺寸有所不同。",
+    "type": "string",
+    "default": "1024x1024",
+    "options": ["512x512", "1024x1024", "1792x1024", "1024x1792", "2048x2048"]
+  },
+  "default_quality": {
+    "description": "默认图像质量\n图像生成的质量等级，高质量会消耗更多token。",
+    "type": "string",
+    "default": "standard",
+    "options": ["standard", "hd", "ultra", "premium"]
+  },
+  "default_style": {
+    "description": "默认图像风格\n图像的艺术风格，不同风格会产生不同视觉效果。",
+    "type": "string",
+    "default": "vivid",
+    "options": ["vivid", "natural", "realistic", "anime", "illustration", "photographic", "digital_art", "painting", "3d_render", "concept_art"]
+  },
+  "max_concurrent_jobs": {
+    "description": "最大并发任务数\n同时进行图像生成的最大数量，避免API限流。",
+    "type": "int",
+    "default": 5
+  },
+  "enable_nsfw_filter": {
+    "description": "启用NSFW过滤\n过滤可能包含成人内容的生成请求，建议开启。",
+    "type": "bool",
+    "default": true
+  },
+  "auto_save_images": {
+    "description": "自动保存图像\n生成成功后自动保存到本地目录。",
+    "type": "bool",
+    "default": true
+  },
+  "save_images": {
+    "description": "保存图像到本地\n允许将生成的图像保存到本地存储。",
+    "type": "bool",
+    "default": true
+  },
+  "llm_tool_settings": {
+    "description": "LLM工具调用配置\n用于管理AI助手对话中的图像生成工具调用功能。",
+    "type": "object",
+    "properties": {
+      "llm_tool_enabled": {
+        "description": "启用LLM工具调用\n允许AI助手在对话中自动调用图像生成功能。",
+        "type": "bool",
+        "default": false
+      }
+    },
+    "default": {
+      "llm_tool_enabled": false
+    }
+  },
+  "llm_tool_enabled": {
+    "description": "[已弃用]启用LLM工具调用\n请使用 llm_tool_settings.llm_tool_enabled",
+    "type": "bool",
+    "default": false
+  },
+  "prefix_enabled": {
+    "description": "启用前缀匹配\n通过特定前缀触发图像生成命令。",
+    "type": "bool",
+    "default": false
+  },
+  "prefix_list": {
+    "description": "前缀列表\n自定义触发前缀，多个前缀用逗号分隔。",
+    "type": "string",
+    "default": "/img,/aimg"
+  },
+  "prefix_coexist": {
+    "description": "混合模式\n不@机器人也能触发命令，方便群聊使用。",
+    "type": "bool",
+    "default": false
+  },
+  "whitelist_enabled": {
+    "description": "启用群组白名单\n只允许白名单内的群组使用图像生成功能。",
+    "type": "bool",
+    "default": false
+  },
+  "group_whitelist": {
+    "description": "群组白名单\n允许使用插件的群组ID，多个用逗号分隔。",
+    "type": "string",
+    "default": ""
+  },
+  "user_whitelist_enabled": {
+    "description": "启用用户白名单\n只允许白名单内的用户使用图像生成功能。",
+    "type": "bool",
+    "default": false
+  },
+  "user_whitelist": {
+    "description": "用户白名单\n允许使用插件的用户ID，多个用逗号分隔。",
+    "type": "string",
+    "default": ""
+  },
+  "openai_enabled": {
+    "description": "启用 OpenAI DALL-E\nOpenAI的图像生成服务，质量高但费用较高。",
+    "type": "bool",
+    "default": false
+  },
+  "openai_model": {
+    "description": "OpenAI 模型\nDALL-E 模型名称，推荐使用 dall-e-3。",
+    "type": "string",
+    "default": "dall-e-3"
+  },
+  "openai_main_api_key": {
+    "description": "OpenAI 主 API Key\n从OpenAI官网获取的API密钥。",
+    "type": "string",
+    "default": ""
+  },
+  "openai_main_api_url": {
+    "description": "OpenAI 主 API URL\n官方地址: https://api.openai.com/v1\n支持自定义地址用于代理或兼容服务。",
+    "type": "string",
+    "default": "https://api.openai.com/v1"
+  },
+  "openai_backup_api_key": {
+    "description": "OpenAI 备用 API Key\n当主密钥失效时自动切换使用。",
+    "type": "string",
+    "default": ""
+  },
+  "openai_backup_api_url": {
+    "description": "OpenAI 备用 API URL\n备用服务地址，用于故障转移。",
+    "type": "string",
+    "default": ""
+  },
+  "gemini_enabled": {
+    "description": "启用 Google Gemini Imagen\nGoogle的图像生成服务，支持多语言提示词。",
+    "type": "bool",
+    "default": false
+  },
+  "gemini_model": {
+    "description": "Gemini 模型\nImagen 模型版本，推荐使用 imagen-3.0-generate-002。",
+    "type": "string",
+    "default": "imagen-3.0-generate-002"
+  },
+  "gemini_main_api_key": {
+    "description": "Gemini 主 API Key\n从Google Cloud获取的API密钥。",
+    "type": "string",
+    "default": ""
+  },
+  "gemini_main_api_url": {
+    "description": "Gemini 主 API URL\n官方地址: https://generativelanguage.googleapis.com/v1beta",
+    "type": "string",
+    "default": "https://generativelanguage.googleapis.com/v1beta"
+  },
+  "gemini_backup_api_key": {
+    "description": "Gemini 备用 API Key\n当主密钥失效时自动切换使用。",
+    "type": "string",
+    "default": ""
+  },
+  "gemini_backup_api_url": {
+    "description": "Gemini 备用 API URL\n备用服务地址，用于故障转移。",
+    "type": "string",
+    "default": ""
+  },
+  "grok_enabled": {
+    "description": "启用 xAI Grok\nxAI的图像生成服务，支持创意风格生成。",
+    "type": "bool",
+    "default": false
+  },
+  "grok_model": {
+    "description": "Grok 模型\nGrok-Imagine 模型版本。",
+    "type": "string",
+    "default": "grok-imagine-1.0"
+  },
+  "grok_main_api_key": {
+    "description": "Grok 主 API Key\n从xAI官网获取的API密钥。",
+    "type": "string",
+    "default": ""
+  },
+  "grok_main_api_url": {
+    "description": "Grok 主 API URL\n官方地址: https://api.x.ai/v1",
+    "type": "string",
+    "default": "https://api.x.ai/v1"
+  },
+  "grok_backup_api_key": {
+    "description": "Grok 备用 API Key\n当主密钥失效时自动切换使用。",
+    "type": "string",
+    "default": ""
+  },
+  "grok_backup_api_url": {
+    "description": "Grok 备用 API URL\n备用服务地址，用于故障转移。",
+    "type": "string",
+    "default": ""
+  },
+  "seed_enabled": {
+    "description": "启用 Seed/Seedream\n字节跳动的图像生成服务，性价比高。",
+    "type": "bool",
+    "default": false
+  },
+  "seed_model": {
+    "description": "Seed 模型\nSeedream 模型版本。",
+    "type": "string",
+    "default": "doubao-seedream-4-5-251128"
+  },
+  "seed_main_api_key": {
+    "description": "Seed 主 API Key\n从豆包开放平台获取的API密钥。",
+    "type": "string",
+    "default": ""
+  },
+  "seed_main_api_url": {
+    "description": "Seed 主 API URL\n官方地址: https://api.seede.ai",
+    "type": "string",
+    "default": "https://api.seede.ai"
+  },
+  "seed_backup_api_key": {
+    "description": "Seed 备用 API Key\n当主密钥失效时自动切换使用。",
+    "type": "string",
+    "default": ""
+  },
+  "seed_backup_api_url": {
+    "description": "Seed 备用 API URL\n备用服务地址，用于故障转移。",
+    "type": "string",
+    "default": ""
+  },
+  "zhipu_enabled": {
+    "description": "启用 智谱 AI\n智谱的图像生成服务，支持中文提示词，响应速度快。",
+    "type": "bool",
+    "default": false
+  },
+  "zhipu_model": {
+    "description": "智谱 模型\n支持 models/text-image-generation 等模型。",
+    "type": "string",
+    "default": "models/text-image-generation"
+  },
+  "zhipu_main_api_key": {
+    "description": "智谱 主 API Key\n从智谱开放平台获取的API密钥。",
+    "type": "string",
+    "default": ""
+  },
+  "zhipu_main_api_url": {
+    "description": "智谱 主 API URL\n官方地址: https://open.bigmodel.cn/api/paas/v4",
+    "type": "string",
+    "default": "https://open.bigmodel.cn/api/paas/v4"
+  },
+  "zhipu_backup_api_key": {
+    "description": "智谱 备用 API Key\n当主密钥失效时自动切换使用。",
+    "type": "string",
+    "default": ""
+  },
+  "zhipu_backup_api_url": {
+    "description": "智谱 备用 API URL\n备用服务地址，用于故障转移。",
+    "type": "string",
+    "default": ""
+  },
+  "qianwen_enabled": {
+    "description": "启用 阿里云 千问\n阿里云的图像生成服务，支持多种风格。",
+    "type": "bool",
+    "default": false
+  },
+  "qianwen_model": {
+    "description": "千问 模型\n支持 qwen-vl-plus 等模型。",
+    "type": "string",
+    "default": "qwen-vl-plus"
+  },
+  "qianwen_main_api_key": {
+    "description": "千问 主 API Key\n从阿里云获取的API密钥。",
+    "type": "string",
+    "default": ""
+  },
+  "qianwen_main_api_url": {
+    "description": "千问 主 API URL\n官方地址: https://dashscope.aliyuncs.com/api/text2image",
+    "type": "string",
+    "default": "https://dashscope.aliyuncs.com/api/text2image"
+  },
+  "qianwen_backup_api_key": {
+    "description": "千问 备用 API Key\n当主密钥失效时自动切换使用。",
+    "type": "string",
+    "default": ""
+  },
+  "qianwen_backup_api_url": {
+    "description": "千问 备用 API URL\n备用服务地址，用于故障转移。",
+    "type": "string",
+    "default": ""
+  },
+  "baidu_enabled": {
+    "description": "启用 百度 文心一言\n百度的图像生成服务，中文理解能力强。",
+    "type": "bool",
+    "default": false
+  },
+  "baidu_model": {
+    "description": "文心一言 模型\n支持 ernie-vilg-v2 等模型。",
+    "type": "string",
+    "default": "ernie-vilg-v2"
+  },
+  "baidu_main_api_key": {
+    "description": "百度 主 API Key\n从百度AI开放平台获取的API密钥。",
+    "type": "string",
+    "default": ""
+  },
+  "baidu_main_api_url": {
+    "description": "百度 主 API URL\n官方地址: https://aip.baidubce.com/rpc/2.0/ai_custom/v1/images/text2image",
+    "type": "string",
+    "default": "https://aip.baidubce.com/rpc/2.0/ai_custom/v1/images/text2image"
+  },
+  "baidu_backup_api_key": {
+    "description": "百度 备用 API Key\n当主密钥失效时自动切换使用。",
+    "type": "string",
+    "default": ""
+  },
+  "baidu_backup_api_url": {
+    "description": "百度 备用 API URL\n备用服务地址，用于故障转移。",
+    "type": "string",
+    "default": ""
+  },
+  "hunyuan_enabled": {
+    "description": "启用 腾讯 混元\n腾讯的图像生成服务，支持多种风格和尺寸。",
+    "type": "bool",
+    "default": false
+  },
+  "hunyuan_model": {
+    "description": "混元 模型\n支持 hunyuan-image 等模型。",
+    "type": "string",
+    "default": "hunyuan-image"
+  },
+  "hunyuan_main_api_key": {
+    "description": "腾讯 主 API Key\n从腾讯云获取的API密钥。",
+    "type": "string",
+    "default": ""
+  },
+  "hunyuan_main_api_url": {
+    "description": "腾讯 主 API URL\n官方地址: https://hunyuan.tencentcloudapi.com/",
+    "type": "string",
+    "default": "https://hunyuan.tencentcloudapi.com/"
+  },
+  "hunyuan_backup_api_key": {
+    "description": "腾讯 备用 API Key\n当主密钥失效时自动切换使用。",
+    "type": "string",
+    "default": ""
+  },
+  "hunyuan_backup_api_url": {
+    "description": "腾讯 备用 API URL\n备用服务地址，用于故障转移。",
+    "type": "string",
+    "default": ""
+  },
+  "stable_diffusion_enabled": {
+    "description": "启用 Stable Diffusion\n本地部署的开源图像生成模型，无需付费。",
+    "type": "bool",
+    "default": false
+  },
+  "stable_diffusion_model": {
+    "description": "Stable Diffusion 模型\n本地部署的模型名称或路径。",
+    "type": "string",
+    "default": "stable-diffusion-xl-base-1.0"
+  },
+  "stable_diffusion_main_api_key": {
+    "description": "SD 主 API Key\n本地部署时通常为空，远程服务需要API密钥。",
+    "type": "string",
+    "default": ""
+  },
+  "stable_diffusion_main_api_url": {
+    "description": "SD 主 API URL\n本地部署默认: http://127.0.0.1:7860\n远程服务填写对应地址。",
+    "type": "string",
+    "default": "http://127.0.0.1:7860"
+  },
+  "stable_diffusion_backup_api_key": {
+    "description": "SD 备用 API Key\n当主密钥失效时自动切换使用。",
+    "type": "string",
+    "default": ""
+  },
+  "stable_diffusion_backup_api_url": {
+    "description": "SD 备用 API URL\n备用服务地址，用于故障转移。",
+    "type": "string",
+    "default": ""
+  }
+}

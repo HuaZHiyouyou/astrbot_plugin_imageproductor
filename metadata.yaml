@@ -1,0 +1,5 @@
+name: astrbot_plugin_imageproductor
+desc: 支持 GPT/DALL-E、Gemini、Grok、Seed、Stable Diffusion 等多平台的 AI 图像生成插件，支持工具调用和命令别名
+version: 1.0.0
+author: AstrBot开发者
+require_version: ">=4.16"
