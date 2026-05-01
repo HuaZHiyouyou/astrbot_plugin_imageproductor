@@ -116,7 +116,7 @@ class ImageProducer(Star):
         self.init_providers()
 
         # 检查配置是否启用函数调用工具
-        if self.conf.get("llm_tool_settings", {}).get("llm_tool_enabled", False) or self.conf.get("llm_tool_enabled", False):
+        if self.conf.get("llm_tool_enabled", False):
             # 注册两个工具
             self.context.add_llm_tools(ImageProducerGenerateTool(plugin=self))
             logger.info("[ImageProducer] 已注册 LLM 工具: img_producer_generate")

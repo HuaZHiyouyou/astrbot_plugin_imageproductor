@@ -43,22 +43,8 @@
     "type": "bool",
     "default": true
   },
-  "llm_tool_settings": {
-    "description": "LLM工具调用配置\n用于管理AI助手对话中的图像生成工具调用功能。",
-    "type": "object",
-    "properties": {
-      "llm_tool_enabled": {
-        "description": "启用LLM工具调用\n允许AI助手在对话中自动调用图像生成功能。",
-        "type": "bool",
-        "default": false
-      }
-    },
-    "default": {
-      "llm_tool_enabled": false
-    }
-  },
   "llm_tool_enabled": {
-    "description": "[已弃用]启用LLM工具调用\n请使用 llm_tool_settings.llm_tool_enabled",
+    "description": "启用LLM工具调用\n允许AI助手在对话中自动调用图像生成功能。",
     "type": "bool",
     "default": false
   },
