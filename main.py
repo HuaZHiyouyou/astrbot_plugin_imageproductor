@@ -104,13 +104,13 @@ class ImageProducer(Star):
 
         self.provider_configs: Dict[str, Dict[str, Any]] = {}
 
-        prefix_config = self.conf.get("prefix_config", {}).get("items", {})
+        prefix_config = self.conf.get("prefix_config", {})
         self.prefix_enabled: bool = prefix_config.get("prefix_enabled", False)
         prefix_list_str: str = prefix_config.get("prefix_list", "/img,/aimg")
         self.prefix_list: list = [p.strip() for p in prefix_list_str.split(",") if p.strip()] if prefix_list_str else []
         self.coexist_enabled: bool = prefix_config.get("coexist_enabled", False)
 
-        whitelist_config = self.conf.get("whitelist_config", {}).get("items", {})
+        whitelist_config = self.conf.get("whitelist_config", {})
         self.group_whitelist_enabled: bool = whitelist_config.get("whitelist_enabled", False)
         group_whitelist_str: str = whitelist_config.get("whitelist_groups", "")
         self.group_whitelist: list = [g.strip() for g in group_whitelist_str.split(",") if g.strip()] if group_whitelist_str else []
@@ -120,7 +120,8 @@ class ImageProducer(Star):
         self.provider_map: Dict[str, BaseProvider] = {}
 
         data_dir = StarTools.get_data_dir("astrbot_plugin_imageproductor")
-        self.ai_images_dir = data_dir / "ai_images"
+        root_data_dir = data_dir.parent.parent
+        self.ai_images_dir = root_data_dir / "ai_images"
         self.refer_images_dir = data_dir / "refer_images"
         self.save_dir = data_dir / "save_images"
         os.makedirs(self.ai_images_dir, exist_ok=True)
@@ -129,7 +130,7 @@ class ImageProducer(Star):
 
         self.session: Optional[aiohttp.ClientSession] = None
 
-        common_config = self.conf.get("common_config", {}).get("items", {})
+        common_config = self.conf.get("common_config", {})
 
         provider_type = "OpenAI"
         self.default_platform = "openai"
@@ -145,10 +146,10 @@ class ImageProducer(Star):
         self.proxy = common_config.get("proxy", "")
         self.timeout = common_config.get("timeout", 300)
 
-        gather_mode_config = self.conf.get("gather_mode_config", {}).get("items", {})
+        gather_mode_config = self.conf.get("gather_mode_config", {})
         self.gather_mode_enabled = gather_mode_config.get("gather_mode_enabled", False)
 
-        llm_tool_settings = self.conf.get("llm_tool_settings", {}).get("items", {})
+        llm_tool_settings = self.conf.get("llm_tool_settings", {})
         self.llm_tool_enabled = llm_tool_settings.get("llm_tool_enabled", False)
 
         self.refer_images = ""  # 暂时为空，预留功能
@@ -184,30 +185,44 @@ class ImageProducer(Star):
         provider_keys = ["main_provider", "back_provider", "back_provider2", "back_provider3", "back_provider4", "back_provider5"]
         is_main = True
 
+        logger.info(f"[ImageProducer] 开始初始化提供商，配置键: {provider_keys}")
+        logger.info(f"[ImageProducer] 当前配置内容: {dict(self.conf)}")
+
         for key in provider_keys:
-            provider_container = self.conf.get(key, {})
-            provider_obj = provider_container.get("items", {})
+            provider_obj = self.conf.get(key, {})
+            logger.info(f"[ImageProducer] 检查提供商 {key}: enabled={provider_obj.get('enabled', False)}, api_type={provider_obj.get('api_type', '')}")
             if isinstance(provider_obj, dict) and provider_obj.get("enabled", False):
                 self._init_single_provider(provider_obj, is_main=is_main)
             is_main = False
+
+        # 如果没有设置默认平台（主提供商未启用），使用第一个已加载的提供商
+        if not self.provider_map:
+            logger.warning(f"[ImageProducer] 未加载任何提供商")
+        elif self.default_platform not in self.provider_map:
+            first_platform = list(self.provider_map.keys())[0]
+            self.default_platform = first_platform
+            logger.info(f"[ImageProducer] 主提供商未启用，使用第一个已加载的提供商作为默认平台: {first_platform}")
+
+        logger.info(f"[ImageProducer] 提供商初始化完成，已加载: {list(self.provider_map.keys())}, 默认平台: {self.default_platform}")
 
     def _init_single_provider(self, provider_obj: Dict[str, Any], is_main: bool = True):
         """初始化单个提供商"""
         api_type = provider_obj.get("api_type", "")
         provider_name = API_TYPE_TO_PROVIDER.get(api_type)
+        api_name = provider_obj.get("api_name", "未命名")
 
         if not provider_name:
-            logger.warning(f"[ImageProducer] 不支持的API类型: {api_type}")
+            logger.warning(f"[ImageProducer] {api_name} 不支持的API类型: {api_type}")
             return
 
         api_key = provider_obj.get("api_key", "")
         if not api_key:
-            logger.warning(f"[ImageProducer] {provider_obj.get('api_name', '提供商')} 未配置API密钥")
+            logger.warning(f"[ImageProducer] {api_name} 未配置API密钥")
             return
 
         provider_class = PROVIDER_CLASS_MAP.get(provider_name)
         if not provider_class:
-            logger.warning(f"[ImageProducer] 未找到Provider类: {provider_name}")
+            logger.warning(f"[ImageProducer] {api_name} 未找到Provider类: {provider_name}")
             return
 
         provider_config = {
@@ -218,7 +233,7 @@ class ImageProducer(Star):
             "main_api_url": provider_obj.get("api_url", ""),
             "backup_api_key": provider_obj.get("vision_api_key", ""),
             "backup_api_url": provider_obj.get("vision_api_url", ""),
-            "api_name": provider_obj.get("api_name", "主提供商" if is_main else "备用提供商"),
+            "api_name": api_name,
             "auto_switch": provider_obj.get("auto_switch", True),
         }
 
@@ -226,11 +241,13 @@ class ImageProducer(Star):
             provider_instance = provider_class(provider_config, self.session)
             self.provider_map[provider_name] = provider_instance
             self.provider_configs[provider_name] = provider_config
-            logger.info(f"[ImageProducer] 已加载 {'主' if is_main else '备用'} provider: {provider_name} ({provider_config['api_name']})")
+            logger.info(f"[ImageProducer] 已加载 {'主' if is_main else '备用'} provider: {provider_name} ({api_name})")
 
             if is_main:
                 self.default_platform = provider_name
                 self.auto_switch_mode = provider_config.get("auto_switch", True)
+        else:
+            logger.warning(f"[ImageProducer] {api_name} session 未初始化，跳过加载")
 
     def is_global_admin(self, event: AstrMessageEvent) -> bool:
         try:
@@ -359,10 +376,10 @@ class ImageProducer(Star):
     def _extract_prompt(self, text: str) -> str:
         import re
         text = re.sub(r'@\S+', '', text)
-        text = re.sub(r'^/img\s*', '', text, flags=re.IGNORECASE)
-        text = re.sub(r'^/aimg\s*', '', text, flags=re.IGNORECASE)
-        text = re.sub(r'^/生图\s*', '', text, flags=re.IGNORECASE)
-        text = re.sub(r'^/ai生图\s*', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'^[/\\]*img\s*', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'^[/\\]*aimg\s*', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'^[/\\]*生图\s*', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'^[/\\]*ai生图\s*', '', text, flags=re.IGNORECASE)
         text = re.sub(r'\bimg\s*', '', text, flags=re.IGNORECASE)
         return text.strip()
 
@@ -503,6 +520,75 @@ class ImageProducer(Star):
         logger.error(f"[ImageProducer] 所有消息发送方法都失败了! 尝试过: {tried_methods}, 最后错误: {last_error}")
         return False
 
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=10)
+    async def on_message(self, event: AstrMessageEvent):
+        """处理 img 相关消息（前缀匹配和唤醒命令）"""
+        # 获取消息文本
+        text = self._get_message_text(event)
+        logger.info(f"[ImageProducer] on_message 触发，文本: {text[:50] if text else 'None'}, 前缀列表: {self.prefix_list}, 提供商: {list(self.provider_map.keys())}")
+        if not text:
+            return
+
+        # 检查是否匹配前缀
+        matched_prefix = None
+        for prefix in self.prefix_list:
+            if text.startswith(prefix):
+                matched_prefix = prefix
+                break
+
+        # 检查是否是唤醒命令
+        is_wake_command = event.is_at_or_wake_command
+        logger.info(f"[ImageProducer] 前缀匹配: {matched_prefix}, 唤醒命令: {is_wake_command}")
+
+        # 判断是否需要处理这条消息
+        should_process = False
+        process_text = text
+
+        if matched_prefix:
+            # 前缀匹配，去除前缀
+            process_text = text[len(matched_prefix):].lstrip()
+            should_process = True
+        elif is_wake_command:
+            # 唤醒命令，检查是否以 img 相关命令开头
+            import re
+            cleaned_text = text.strip()
+            # 匹配 /img, /aimg, /生图, /ai生图 等命令（不使用 \b，因为后面可能跟中文）
+            match = re.match(r'^[/\\]*(img|aimg|生图|ai生图)', cleaned_text, re.IGNORECASE)
+            if match:
+                # 提取 img 后面的内容
+                after_img = cleaned_text[match.end():].strip()
+                # 如果是纯 img 或后面跟着的是提示词/图片，让 command 装饰器处理
+                # 如果是 img帮助、img设置、img平台 等子命令，也跳过让 command 处理
+                sub_commands = ["帮助", "help", "设置", "config", "平台", "platform"]
+                if not after_img or after_img.lower() not in [s.lower() for s in sub_commands]:
+                    # 纯 img 或 img+提示词，跳过处理（让 command 装饰器处理）
+                    logger.info(f"[ImageProducer] 唤醒命令匹配，跳过处理（由 command 装饰器处理）")
+                    return
+                else:
+                    # 子命令，由 on_message 处理
+                    process_text = after_img
+                    should_process = True
+
+        if not should_process:
+            return
+
+        logger.info(f"[ImageProducer] 开始处理消息，提供商数量: {len(self.provider_map)}")
+
+        # 白名单检查
+        if not self.is_group_allowed(event):
+            await self._safe_reply(event, "❌ 当前群组不在白名单中，无法使用图像生成功能")
+            return
+
+        if not self.is_user_allowed(event):
+            await self._safe_reply(event, "❌ 当前用户不在白名单中，无法使用图像生成功能")
+            return
+
+        # 收集模式处理
+        if self.gather_mode_enabled:
+            await self._generate_image_gather_mode(event)
+        else:
+            await self._generate_image_direct_mode(event, override_text=process_text)
+
     @filter.command("img", alias={"aimg", "生图", "ai生图"})
     async def generate_image_command(self, event: AstrMessageEvent):
         if not self.is_group_allowed(event):
@@ -513,17 +599,22 @@ class ImageProducer(Star):
             await self._safe_reply(event, "❌ 当前用户不在白名单中，无法使用图像生成功能")
             return
 
-        gather_mode = self.conf.get("gather_mode_enabled", False)
-
-        if gather_mode:
+        if self.gather_mode_enabled:
             await self._generate_image_gather_mode(event)
         else:
             await self._generate_image_direct_mode(event)
 
-    async def _generate_image_direct_mode(self, event: AstrMessageEvent):
+    async def _generate_image_direct_mode(self, event: AstrMessageEvent, override_text: str = None):
         """直接模式：立即生成图片"""
-        text = self._get_message_text(event)
+        text = override_text if override_text is not None else self._get_message_text(event)
         prompt = self._extract_prompt(text)
+
+        # 检查是否是子命令
+        if prompt:
+            sub_command = prompt.strip().lower()
+            if sub_command in ["帮助", "help", "设置", "config", "平台", "platform"]:
+                await self._handle_img_subcommand(event, sub_command)
+                return
 
         # 检查是否是预设触发词
         # 格式：/img <触发词> <文本>
@@ -557,6 +648,99 @@ class ImageProducer(Star):
             return
 
         await self._generate_and_send(event, prompt, image_b64_list)
+
+    async def _handle_img_subcommand(self, event: AstrMessageEvent, sub_command: str):
+        """处理 img 子命令（帮助、设置、平台等）"""
+        if sub_command in ["帮助", "help"]:
+            help_text = """📖 <b>AI 图像生成器 - 使用帮助</b>
+
+<b>基础指令：</b>
+• <code>/img [提示词]</code> - 根据文字生成图片
+• <code>/img [预设名] [内容]</code> - 使用预设风格生成
+• <code>/img [图片]</code> - 以图生图
+• <code>/img [图片] [提示词]</code> - 参考图片+文字生成
+
+<b>预设风格：</b>
+• <code>/img列表</code> - 查看所有预设
+• <code>/img查看 [名称]</code> - 查看预设详情
+
+<b>提示词指令：</b>
+• <code>/提示词 [描述]</code> - AI 帮你优化提示词
+• <code>/生成</code> - 两阶段生成（提示词→图片）
+
+<b>智能功能：</b>
+• 带图片自动使用视觉模型
+• 主提供商失败自动切换备用
+• 支持多图参考融合
+
+💡 提示：发送图片后自动进入以图生图模式"""
+            await self._safe_reply(event, help_text)
+            
+        elif sub_command in ["设置", "config"]:
+            settings_text = """⚙️ <b>当前配置信息</b>
+
+<b>主提供商：</b>
+"""
+            main_provider = self.conf.get("main_provider", {})
+            if main_provider:
+                api_type = main_provider.get("api_type", "未配置")
+                api_name = main_provider.get("api_name", "主提供商")
+                model = main_provider.get("model", "未配置")
+                vision_model = main_provider.get("vision_model", "未配置")
+                enabled = main_provider.get("enabled", False)
+                settings_text += f"""• 名称：{api_name}
+• API类型：{api_type}
+• 状态：{"✅ 已启用" if enabled else "❌ 已禁用"}
+• 生成模型：{model}
+• 视觉模型：{vision_model}
+"""
+            else:
+                settings_text += "• 未配置\n"
+            
+            settings_text += "\n<b>备用提供商：</b>\n"
+            back_providers = ["back_provider", "back_provider2", "back_provider3", "back_provider4", "back_provider5"]
+            for i, bp_key in enumerate(back_providers, 1):
+                bp = self.conf.get(bp_key, {})
+                if bp and bp.get("enabled", False):
+                    api_type = bp.get("api_type", "未配置")
+                    api_name = bp.get("api_name", f"备用{i}")
+                    model = bp.get("model", "未配置")
+                    settings_text += f"• {api_name}（{api_type}）- {model}\n"
+            
+            settings_text += f"""
+<b>默认设置：</b>
+• 图像尺寸：{self.default_size}
+• 图像质量：{self.default_quality}
+• 图像风格：{self.default_style}
+• 并发任务数：{self.max_concurrent_jobs}
+• 超时时间：{self.timeout}秒
+
+💡 请在插件设置页面修改配置"""
+            await self._safe_reply(event, settings_text)
+            
+        elif sub_command in ["平台", "platform"]:
+            platform_text = """🔄 <b>提供商状态</b>
+
+<b>当前默认平台：</b>{}""".format(self.default_platform)
+
+            platform_text += "\n\n<b>已加载的提供商：</b>\n"
+            for pname, pconfig in self.provider_configs.items():
+                api_name = pconfig.get("api_name", pname)
+                model = pconfig.get("model", "未配置")
+                vision_model = pconfig.get("vision_model", "未配置")
+                is_default = "⭐" if pname == self.default_platform else "  "
+                platform_text += f"{is_default}{api_name}：{pname}\n"
+                platform_text += f"   生成模型：{model}\n"
+                platform_text += f"   视觉模型：{vision_model}\n"
+            
+            platform_text += """
+<b>降级机制：</b>
+• 主提供商失败后，依次尝试备用提供商
+• 最多重试 {} 次
+• 支持 6 个提供商配置
+
+💡 请在插件设置页面配置多个提供商""".format(self.max_retry)
+            await self._safe_reply(event, platform_text)
 
     async def _generate_image_gather_mode(self, event: AstrMessageEvent):
         """收集模式：收集多张图片和文本后生成"""
@@ -669,17 +853,17 @@ class ImageProducer(Star):
             await self._safe_reply(event, "💡 请提供图像描述，我将为你生成专业提示词\n示例: /提示词 一只可爱的猫咪在草地上玩耍")
             return
 
-        prompt = await self._generate_prompt(text)
+        prompt = await self._generate_prompt(text, event)
         if prompt:
             await self._safe_reply(event, f"✨ 生成的提示词:\n{prompt}")
         else:
             await self._safe_reply(event, "❌ 提示词生成失败，请稍后重试")
 
-    async def _generate_prompt(self, user_description: str) -> Optional[str]:
+    async def _generate_prompt(self, user_description: str, event: AstrMessageEvent = None) -> Optional[str]:
         try:
             logger.info(f"[ImageProducer] 开始生成提示词，描述: {user_description[:50]}...")
             result = await asyncio.wait_for(
-                self._generate_prompt_internal(user_description),
+                self._generate_prompt_internal(user_description, event),
                 timeout=60  # 60秒超时
             )
             if result:
@@ -694,13 +878,11 @@ class ImageProducer(Star):
             logger.error(f"[ImageProducer] 生成提示词异常: {e}", exc_info=True)
             return None
     
-    async def _generate_prompt_internal(self, user_description: str) -> Optional[str]:
+    async def _generate_prompt_internal(self, user_description: str, event: AstrMessageEvent = None) -> Optional[str]:
         """
         内部提示词生成 - 尝试调用 AstrBot 的 LLM 能力
         """
         try:
-            from astrbot.api.star import StarTools
-            
             messages = [
                 {
                     "role": "system",
@@ -712,21 +894,43 @@ class ImageProducer(Star):
                 }
             ]
             
-            # 使用 AstrBot 的 LLM 能力
             try:
-                result = await StarTools.llm_completion(messages)
-                if result and hasattr(result, 'get'):
-                    content = result.get('content', '')
-                    if content:
-                        return content.strip()
+                from astrbot.core.agent.message import UserMessageSegment, TextPart
+                contexts = [
+                    UserMessageSegment(content=[TextPart(text=msg["content"])])
+                    for msg in messages
+                ]
                 
-                # 尝试其他可能的返回格式
-                if isinstance(result, str):
-                    return result.strip()
-                elif hasattr(result, 'content'):
-                    return str(result.content).strip()
-                elif isinstance(result, dict) and 'content' in result:
-                    return str(result['content']).strip()
+                umo = None
+                if event and hasattr(event, 'unified_msg_origin'):
+                    umo = event.unified_msg_origin
+                
+                provider_id = None
+                if umo:
+                    try:
+                        provider_id = await self.context.get_current_chat_provider_id(umo=umo)
+                    except Exception as e:
+                        logger.warning(f"[ImageProducer] 获取 provider_id 失败: {e}")
+                
+                if not provider_id:
+                    try:
+                        provider_id = await self.context.get_current_chat_provider_id()
+                    except Exception as e:
+                        logger.warning(f"[ImageProducer] 获取默认 provider_id 失败: {e}")
+                        return None
+                
+                logger.info(f"[ImageProducer] 使用 LLM 生成提示词，provider_id: {provider_id}")
+                
+                result = await self.context.llm_generate(
+                    chat_provider_id=provider_id,
+                    contexts=contexts
+                )
+                
+                if result and hasattr(result, 'completion_text'):
+                    content = result.completion_text
+                    if content:
+                        logger.info(f"[ImageProducer] 提示词生成成功，长度: {len(content)}")
+                        return content.strip()
                     
             except Exception as llm_err:
                 logger.error(f"[ImageProducer] LLM调用失败: {llm_err}", exc_info=True)
@@ -736,6 +940,93 @@ class ImageProducer(Star):
             logger.error(f"[ImageProducer] 提示词生成内部异常: {e}", exc_info=True)
             return None
         return None
+
+    async def _refine_prompt_with_llm(self, image_description: str, user_prompt: str, event: AstrMessageEvent = None) -> str:
+        """
+        使用 AstrBot LLM 修饰图片描述和用户描述，生成优质图像提示词
+        
+        Args:
+            image_description: 视觉模型返回的图片描述
+            user_prompt: 用户需求描述
+            event: 消息事件，用于获取会话上下文
+            
+        Returns:
+            str: 优化后的英文图像生成提示词
+        """
+        try:
+            messages = [
+                {
+                    "role": "system",
+                    "content": """You are a professional AI image generation prompt engineer. Your task is to combine image descriptions and user requirements to create detailed, high-quality English image generation prompts. Requirements:
+1. Must be in English only
+2. Detailed description of scene, subject, style, lighting, colors, etc.
+3. Add quality keywords like masterpiece, best quality, ultra-detailed, high quality, 8k
+4. The prompt should be 100-300 words long
+5. Integrate the user's requirements into the visual style of the reference image
+6. Just return the prompt directly, do not include any additional explanations"""
+                },
+                {
+                    "role": "user",
+                    "content": f"""请根据以下参考图片描述和用户需求，生成一个专业的英文图像生成提示词。
+
+参考图片描述：
+{image_description}
+
+用户需求：
+{user_prompt}
+
+请直接返回英文提示词，不要有任何其他内容。"""
+                }
+            ]
+            
+            try:
+                from astrbot.core.agent.message import UserMessageSegment, TextPart
+                contexts = [
+                    UserMessageSegment(content=[TextPart(text=msg["content"])])
+                    for msg in messages
+                ]
+                
+                umo = None
+                if event and hasattr(event, 'unified_msg_origin'):
+                    umo = event.unified_msg_origin
+                
+                provider_id = None
+                if umo:
+                    try:
+                        provider_id = await self.context.get_current_chat_provider_id(umo=umo)
+                    except Exception as e:
+                        logger.warning(f"[ImageProducer] 获取 provider_id 失败: {e}")
+                
+                if not provider_id:
+                    try:
+                        provider_id = await self.context.get_current_chat_provider_id()
+                    except Exception as e:
+                        logger.warning(f"[ImageProducer] 获取默认 provider_id 失败: {e}")
+                        return None
+                
+                logger.info(f"[ImageProducer] 使用 LLM 修饰提示词，provider_id: {provider_id}")
+                
+                result = await self.context.llm_generate(
+                    chat_provider_id=provider_id,
+                    contexts=contexts
+                )
+                
+                if result and hasattr(result, 'completion_text'):
+                    content = result.completion_text
+                    if content:
+                        import re
+                        content = re.sub(r'^```.*?\n', '', content)
+                        content = re.sub(r'\n```$', '', content)
+                        logger.info(f"[ImageProducer] LLM修饰完成，提示词长度: {len(content)}")
+                        return content.strip()
+                    
+            except Exception as llm_err:
+                logger.error(f"[ImageProducer] LLM修饰失败: {llm_err}", exc_info=True)
+                return None
+                
+        except Exception as e:
+            logger.error(f"[ImageProducer] LLM修饰内部异常: {e}", exc_info=True)
+            return None
         
     async def _llm_tool_job(self, event: AstrMessageEvent, prompt: str, size: str = None, image_b64_list: list = None) -> Dict[str, Any]:
         """
@@ -824,7 +1115,7 @@ class ImageProducer(Star):
 
         await self._safe_reply(event, f"🎨 正在生成专业提示词...\n描述: {text or '基于参考图片'}")
 
-        prompt = await self._generate_prompt(text or "基于参考图片生成图像")
+        prompt = await self._generate_prompt(text or "基于参考图片生成图像", event)
         if not prompt:
             await self._safe_reply(event, "❌ 提示词生成失败，尝试直接生成图像...")
             prompt = text or "根据参考图片生成图像"
@@ -837,9 +1128,8 @@ class ImageProducer(Star):
         生成图片并发送给用户，确保100%给用户回复
         
         发送策略：
-        1. 无论如何先发送简单的文本消息（最容易成功）
-        2. 然后尝试发送图片
-        3. 最后尝试发送URL或附加信息
+        1. 发送简单的文本消息（正在生成）
+        2. 生成完成后发送图片
         """
         # === 阶段 1: 准备 ===
         try:
@@ -848,8 +1138,8 @@ class ImageProducer(Star):
                 return
             logger.info(f"[ImageProducer] 开始生成图像，提示词: {prompt[:50]}...")
             
-            # 先发送"正在生成"的消息（这个必须先成功！）
-            await self._safe_reply(event, f"🎨 正在生成图像...\n提示词: {prompt}")
+            # 发送"正在生成"的消息
+            await self._safe_reply(event, "🎨 正在生成图像...")
         except Exception as e:
             logger.error(f"[ImageProducer] 发送开始消息失败，但继续尝试: {e}", exc_info=True)
         
@@ -865,20 +1155,53 @@ class ImageProducer(Star):
         result = None
         save_path = None
         image_b64_data = None
-        final_message = "✅ 图像生成完成！"
 
         # 智能选择平台：有图片时自动使用视觉模型
         target_platform = self.default_platform
         has_images = bool(image_b64_list and len(image_b64_list) > 0)
+        final_prompt = prompt
         
         if has_images and self.auto_switch_mode:
-            api_type = self.conf.get("provider_type", "")
+            main_provider_config = self.conf.get("main_provider", {})
+            api_type = main_provider_config.get("api_type", "")
+            logger.info(f"[ImageProducer] 视觉模型切换检查: api_type={api_type}, provider_map={list(self.provider_map.keys())}, auto_switch_mode={self.auto_switch_mode}")
             vision_provider_name = PLATFORM_TO_VISION_PROVIDER.get(api_type)
+            logger.info(f"[ImageProducer] 视觉模型映射: {api_type} -> {vision_provider_name}")
+            
+            # 先调用视觉模型分析图片，得到图片描述
+            provider = self.provider_map.get(self.default_platform)
+            if provider:
+                vision_api_key = main_provider_config.get("vision_api_key", "")
+                vision_api_url = main_provider_config.get("vision_api_url", "")
+                if vision_api_key and vision_api_url:
+                    logger.info(f"[ImageProducer] 开始视觉模型分析图片...")
+                    image_description = await provider._analyze_reference_images(
+                        vision_api_url, vision_api_key, image_b64_list, prompt
+                    )
+                    logger.info(f"[ImageProducer] 视觉模型分析完成: {image_description[:50]}...")
+                    
+                    # 使用 AstrBot LLM 修饰图片描述和用户描述
+                    logger.info(f"[ImageProducer] 开始 LLM 修饰...")
+                    refined_prompt = await self._refine_prompt_with_llm(image_description, prompt, event)
+                    if refined_prompt:
+                        final_prompt = refined_prompt
+                        logger.info(f"[ImageProducer] LLM 修饰完成，使用新提示词: {final_prompt[:50]}...")
+                    else:
+                        logger.warning(f"[ImageProducer] LLM 修饰失败，使用原始提示词")
+                else:
+                    logger.info(f"[ImageProducer] 未配置视觉模型，使用原始提示词")
+            
             if vision_provider_name and vision_provider_name in self.provider_map:
                 target_platform = vision_provider_name
                 logger.info(f"[ImageProducer] 检测到图片，自动切换到视觉模型: {target_platform}")
+            elif self.default_platform and self.default_platform in self.provider_map:
+                if vision_api_key and vision_api_url:
+                    logger.info(f"[ImageProducer] 检测到图片，使用默认提供商 {self.default_platform} + 视觉模型配置: vision_api_url={vision_api_url}, vision_model={vision_model}")
+                    target_platform = self.default_platform
+                else:
+                    logger.info(f"[ImageProducer] 检测到图片，但未配置视觉模型（vision_provider_name={vision_provider_name}, in_map={vision_provider_name in self.provider_map if vision_provider_name else False}），继续使用默认平台: {target_platform}")
             else:
-                logger.info(f"[ImageProducer] 检测到图片，但未配置视觉模型，继续使用默认平台: {target_platform}")
+                logger.info(f"[ImageProducer] 检测到图片，但未找到可用提供商，继续使用默认平台: {target_platform}")
         
         try:
             try:
@@ -886,25 +1209,22 @@ class ImageProducer(Star):
                     result = await asyncio.wait_for(
                         self.generate_image_internal(
                             platform=target_platform,
-                            prompt=prompt,
+                            prompt=final_prompt,
                             size=self.default_size,
                             quality=self.default_quality,
                             style=self.default_style,
-                            image_b64_list=image_b64_list,
+                            image_b64_list=None if has_images else image_b64_list,
                         ),
                         timeout=180  # 3分钟超时
                     )
             except asyncio.TimeoutError:
                 logger.error(f"[ImageProducer] 生成图像超时（3分钟）")
-                final_message = "⏰ 图像生成超时了！请稍后重试。"
                 result = None
             except Exception as e:
                 logger.error(f"[ImageProducer] 生成过程异常: {e}", exc_info=True)
-                final_message = f"⚠️ 生成出错: {str(e)}"
                 result = None
         except Exception as e:
             logger.error(f"[ImageProducer] 阶段2总异常: {e}", exc_info=True)
-            final_message = "❌ 生成失败，但已尝试处理"
         
         # === 阶段 3: 处理结果（保存到本地）===
         try:
@@ -914,6 +1234,9 @@ class ImageProducer(Star):
                     if result.image_data:
                         save_path = await self._save_image_to_ai_images(result.image_data, prompt)
                         image_b64_data = base64.b64encode(result.image_data).decode('utf-8')
+                    elif result.b64_json:
+                        image_b64_data = result.b64_json
+                        save_path = await self._save_image_to_ai_images(base64.b64decode(result.b64_json), prompt)
                     elif result.image_url:
                         logger.info(f"[ImageProducer] 下载图片: {result.image_url}")
                         save_path = await self._download_and_save_to_ai_images(result.image_url, prompt)
@@ -928,25 +1251,38 @@ class ImageProducer(Star):
         except Exception as e:
             logger.error(f"[ImageProducer] 阶段3总异常: {e}", exc_info=True)
         
-        # === 阶段 4: 发送给用户（关键！） ===
-        # 策略：先送简单文本，再尝试复杂的
+        # === 阶段 4: 发送给用户 ===
         try:
-            # --- 4.1 先发送一个简单的成功/失败消息 ---
             if result and result.success:
-                base_message = "✅ 图像生成成功！"
-            elif result and not result.success:
-                base_message = f"❌ 图像生成失败: {result.error}"
-            else:
-                base_message = final_message
-            
-            # 先发送这个基础消息！（确保用户能收到）
-            await self._safe_reply(event, base_message)
-            logger.info("[ImageProducer] 基础消息已发送")
-            
-            # --- 4.2 尝试发送更丰富的消息 ---
-            if result and result.success:
-                # 尝试1: 发送图片
-                if image_b64_data:
+                # 优先使用保存的本地文件路径发送
+                if save_path and os.path.exists(save_path):
+                    try:
+                        msg_chain: list[BaseMessageComponent] = [
+                            Comp.Reply(id=event.message_obj.message_id) if hasattr(event.message_obj, 'message_id') else None,
+                            Comp.Image.fromFileSystem(save_path)
+                        ]
+                        msg_chain = [c for c in msg_chain if c is not None]
+                        await event.send(MessageChain(chain=msg_chain))
+                        logger.info(f"[ImageProducer] 图片发送成功 (路径: {save_path})")
+                    except Exception as pic_err:
+                        logger.error(f"[ImageProducer] 发送本地图片失败: {pic_err}")
+                        # 发送失败，尝试 base64
+                        if image_b64_data:
+                            try:
+                                msg_chain = [
+                                    Comp.Reply(id=event.message_obj.message_id) if hasattr(event.message_obj, 'message_id') else None,
+                                    Comp.Image.fromBase64(image_b64_data)
+                                ]
+                                msg_chain = [c for c in msg_chain if c is not None]
+                                await event.send(MessageChain(chain=msg_chain))
+                                logger.info("[ImageProducer] 图片发送成功 (base64)")
+                            except Exception as b64_err:
+                                logger.error(f"[ImageProducer] 发送 base64 图片失败: {b64_err}")
+                                if result.image_url:
+                                    await self._safe_reply(event, f"🎨 图片链接:\n{result.image_url}")
+                        elif result.image_url:
+                            await self._safe_reply(event, f"🎨 图片链接:\n{result.image_url}")
+                elif image_b64_data:
                     try:
                         msg_chain: list[BaseMessageComponent] = [
                             Comp.Reply(id=event.message_obj.message_id) if hasattr(event.message_obj, 'message_id') else None,
@@ -954,34 +1290,23 @@ class ImageProducer(Star):
                         ]
                         msg_chain = [c for c in msg_chain if c is not None]
                         await event.send(MessageChain(chain=msg_chain))
-                        logger.info("[ImageProducer] 图片发送成功")
-                        
-                        # 成功发送图片后，再发送保存路径
-                        if save_path:
-                            await self._safe_reply(event, f"📁 已保存到: {save_path}")
+                        logger.info("[ImageProducer] 图片发送成功 (base64)")
                     except Exception as pic_err:
                         logger.error(f"[ImageProducer] 发送图片失败: {pic_err}")
-                        # 发送图片失败，发送URL
                         if result.image_url:
                             await self._safe_reply(event, f"🎨 图片链接:\n{result.image_url}")
-                # 尝试2: 只发送URL
+                # 只发送URL
                 elif result.image_url:
                     await self._safe_reply(event, f"🎨 图片链接:\n{result.image_url}")
-                
-                # 保存路径提示（如果还没发送过）
-                if save_path and not image_b64_data:
-                    await self._safe_reply(event, f"📁 已保存到: {save_path}")
+                else:
+                    await self._safe_reply(event, "✅ 图像生成成功")
+            elif result and not result.success:
+                await self._safe_reply(event, f"❌ 图像生成失败: {result.error}")
+            else:
+                await self._safe_reply(event, "⏰ 图像生成超时，请稍后重试")
         
         except Exception as send_err:
             logger.error(f"[ImageProducer] 阶段4消息发送异常: {send_err}", exc_info=True)
-        
-        # === 阶段 5: 最后的保险！ ===
-        # 我们不管怎么样，一定要再发送一个确认消息
-        try:
-            # 延迟一小会儿，确保前面的消息有机会发送
-            await asyncio.sleep(0.1)
-        except Exception:
-            pass
         
         # === 完成 ===
         logger.info("[ImageProducer] 整个流程结束")

@@ -1,4 +1,62 @@
 {
+    "prefix_config": {
+        "description": "命令触发方式",
+        "type": "object",
+        "items": {
+            "prefix_enabled": {
+                "description": "启用前缀匹配",
+                "type": "bool",
+                "default": false
+            },
+            "prefix_list": {
+                "description": "命令前缀列表",
+                "type": "string",
+                "default": "/img,/aimg"
+            },
+            "coexist_enabled": {
+                "description": "混合模式",
+                "type": "bool",
+                "default": false
+            }
+        }
+    },
+    "gather_mode_config": {
+        "description": "收集模式配置",
+        "type": "object",
+        "items": {
+            "gather_mode_enabled": {
+                "description": "启用收集模式",
+                "type": "bool",
+                "default": false
+            }
+        }
+    },
+    "whitelist_config": {
+        "description": "白名单配置",
+        "type": "object",
+        "items": {
+            "whitelist_enabled": {
+                "description": "启用群组白名单",
+                "type": "bool",
+                "default": false
+            },
+            "whitelist_groups": {
+                "description": "白名单群组ID",
+                "type": "string",
+                "default": ""
+            },
+            "user_enabled": {
+                "description": "启用用户白名单",
+                "type": "bool",
+                "default": false
+            },
+            "user_whitelist": {
+                "description": "用户ID白名单",
+                "type": "string",
+                "default": ""
+            }
+        }
+    },
     "main_provider": {
         "description": "主提供商",
         "type": "object",
@@ -419,64 +477,6 @@
             },
             "proxy": {
                 "description": "HTTP 代理",
-                "type": "string",
-                "default": ""
-            }
-        }
-    },
-    "prefix_config": {
-        "description": "命令触发方式",
-        "type": "object",
-        "items": {
-            "prefix_enabled": {
-                "description": "启用前缀匹配",
-                "type": "bool",
-                "default": false
-            },
-            "prefix_list": {
-                "description": "命令前缀列表",
-                "type": "string",
-                "default": "/img,/aimg"
-            },
-            "coexist_enabled": {
-                "description": "混合模式",
-                "type": "bool",
-                "default": false
-            }
-        }
-    },
-    "gather_mode_config": {
-        "description": "收集模式配置",
-        "type": "object",
-        "items": {
-            "gather_mode_enabled": {
-                "description": "启用收集模式",
-                "type": "bool",
-                "default": false
-            }
-        }
-    },
-    "whitelist_config": {
-        "description": "白名单配置",
-        "type": "object",
-        "items": {
-            "whitelist_enabled": {
-                "description": "启用群组白名单",
-                "type": "bool",
-                "default": false
-            },
-            "whitelist_groups": {
-                "description": "白名单群组ID",
-                "type": "string",
-                "default": ""
-            },
-            "user_enabled": {
-                "description": "启用用户白名单",
-                "type": "bool",
-                "default": false
-            },
-            "user_whitelist": {
-                "description": "用户ID白名单",
                 "type": "string",
                 "default": ""
             }
