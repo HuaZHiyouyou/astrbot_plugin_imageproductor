@@ -137,3 +137,88 @@ class BaseProvider(ABC):
             except ValueError:
                 pass
         return 1024, 1024
+
+    async def _analyze_reference_images(
+        self,
+        api_url: str,
+        api_key: str,
+        image_b64_list: list,
+        user_prompt: str
+    ) -> str:
+        """使用视觉模型分析参考图片，返回图片描述（由 AstrBot LLM 修饰为提示词）
+
+        Args:
+            api_url: 视觉模型 API URL
+            api_key: 视觉模型 API Key
+            image_b64_list: 图片base64列表 [(mime, b64_data), ...]
+            user_prompt: 用户需求描述
+
+        Returns:
+            str: 图片描述（非完整提示词）
+        """
+        from astrbot.api import logger
+        import re
+
+        try:
+            content_parts = []
+
+            # 添加参考图片
+            for mime, b64_data in image_b64_list:
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{mime};base64,{b64_data}"
+                    }
+                })
+
+            # 添加分析提示 - 只返回图片描述，不生成完整提示词
+            content_parts.append({
+                "type": "text",
+                "text": f"""请详细描述这张图片的所有视觉元素，包括：
+1. 主体内容（人物、物体、场景等）
+2. 颜色和色调
+3. 构图和布局
+4. 艺术风格
+5. 光线和阴影
+6. 氛围和情感
+7. 背景和细节
+
+请用中文描述，尽量详细。"""
+            })
+
+            payload = {
+                "model": "gpt-4o",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": content_parts
+                    }
+                ],
+                "max_tokens": 1000
+            }
+
+            url = f"{api_url}/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+
+            async with self.session.post(url, headers=headers, json=payload) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    if "choices" in result and len(result["choices"]) > 0:
+                        image_description = result["choices"][0]["message"]["content"]
+                        # 清理可能的多余内容
+                        image_description = re.sub(r'^```.*?\n', '', image_description)
+                        image_description = re.sub(r'\n```$', '', image_description)
+                        logger.info(f"[ImageProducer] 视觉模型分析完成，描述长度: {len(image_description)}")
+                        return image_description
+                else:
+                    error_text = await response.text()
+                    logger.error(f"[ImageProducer] 视觉模型 API 错误: {response.status} - {error_text}")
+
+        except Exception as e:
+            logger.error(f"[ImageProducer] 视觉模型分析异常: {e}", exc_info=True)
+
+        # 如果分析失败，使用原始用户描述
+        return user_prompt

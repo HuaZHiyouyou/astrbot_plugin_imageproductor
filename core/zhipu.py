@@ -21,13 +21,20 @@ class ZhipuProvider(BaseProvider):
     supported_qualities = ["standard", "hd"]
     supported_styles = ["vivid", "natural", "realistic", "anime", "illustration"]
 
-    def _get_api_config(self) -> Tuple[str, str]:
-        """获取当前可用的 API 配置"""
+    def _get_api_config(self, use_vision: bool = False) -> Tuple[str, str]:
+        """获取当前可用的 API 配置
+        
+        Args:
+            use_vision: 是否使用视觉模型配置（backup_api_key/backup_api_url）
+        """
         main_key = self.config.get("main_api_key", "")
         main_url = self.config.get("main_api_url", "")
         backup_key = self.config.get("backup_api_key", "")
         backup_url = self.config.get("backup_api_url", "")
 
+        if use_vision and backup_key and backup_url:
+            # 使用视觉模型配置
+            return backup_key, backup_url
         if main_key and main_url:
             return main_key, main_url
         if backup_key and backup_url:
@@ -281,13 +288,23 @@ class ZhipuProvider(BaseProvider):
             
             # 智能选择模式
             if has_images and auto_switch_mode:
-                logger.info(f"[ImageProducer] 检测到参考图片，自动切换到Chat模式")
+                logger.info(f"[ImageProducer] 检测到参考图片，使用视觉模型分析后生成")
+                # 先用视觉模型分析图片，得到增强提示词
+                vision_api_key, vision_api_url = self._get_api_config(use_vision=True)
                 vision_model = model or self.config.get("vision_model", "glm-4v")
-                return await self._generate_with_chat_api(
-                    prompt, vision_model, api_key, api_url, image_b64_list, **kwargs
+                enhanced_prompt = await self._analyze_reference_images(
+                    vision_api_url, vision_api_key, image_b64_list, prompt
+                )
+                logger.info(f"[ImageProducer] 视觉模型分析完成，使用增强提示词生成图像")
+                # 再用图像生成 API 生成图片
+                api_key, api_url = self._get_api_config(use_vision=False)
+                gen_model = model or self.config.get("model", "models/text-image-generation")
+                return await self._generate_with_images_api(
+                    enhanced_prompt, gen_model, size, api_key, api_url, None, **kwargs
                 )
             else:
                 logger.info(f"[ImageProducer] 使用普通图像生成模式")
+                api_key, api_url = self._get_api_config(use_vision=False)
                 gen_model = model or self.config.get("model", "models/text-image-generation")
                 return await self._generate_with_images_api(
                     prompt, gen_model, size, api_key, api_url, image_b64_list, **kwargs

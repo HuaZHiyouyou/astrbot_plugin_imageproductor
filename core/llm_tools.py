@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import re
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from astrbot.api import logger
@@ -48,28 +49,27 @@ PROMPT_EXAMPLES = [
 ]
 
 
+@dataclass
 class ImageProducerPromptTool(FunctionTool[AstrAgentContext]):
-    """
-    提示词生成工具 - 用于将用户简单描述生成专业图像生成提示词
-    """
-
-    plugin: Any = None
-    name: str = "img_producer_prompt"
-    description: str = (
-        "This tool is used to generate professional image generation prompts from simple user descriptions. "
+    plugin: Any = field(default=None)
+    name: str = field(default="img_producer_prompt")
+    description: str = field(
+        default="This tool is used to generate professional image generation prompts from simple user descriptions. "
         "It will create detailed, high-quality prompts suitable for AI image generation models, including style, "
         "lighting, and quality-related keywords. Use this before image generation if the user's description is too simple."
     )
-    parameters: dict = {
-        "type": "object",
-        "properties": {
-            "user_description": {
-                "type": "string",
-                "description": "The user's simple image description that needs to be expanded into a professional prompt.",
-            }
-        },
-        "required": ["user_description"],
-    }
+    parameters: dict = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "user_description": {
+                    "type": "string",
+                    "description": "The user's simple image description that needs to be expanded into a professional prompt.",
+                }
+            },
+            "required": ["user_description"],
+        }
+    )
 
     async def call(
         self,
@@ -98,7 +98,7 @@ class ImageProducerPromptTool(FunctionTool[AstrAgentContext]):
         logger.info(f"[ImageProducer] 生成提示词，用户描述: {user_description[:100]}")
 
         try:
-            prompt = await plugin._generate_prompt_internal(user_description)
+            prompt = await plugin._generate_prompt_internal(user_description, event)
             if prompt:
                 logger.info(f"[ImageProducer] 提示词生成成功: {prompt[:100]}")
                 return f"专业提示词已生成：\n{prompt}\n\n现在可以使用此提示词调用 img_producer_generate 工具生成图像。"
@@ -109,15 +109,12 @@ class ImageProducerPromptTool(FunctionTool[AstrAgentContext]):
             return f"提示词生成出错: {str(e)}"
 
 
+@dataclass
 class ImageProducerGenerateTool(FunctionTool[AstrAgentContext]):
-    """
-    图像生成工具 - 核心功能，直接生成图像
-    """
-
-    plugin: Any = None
-    name: str = "img_producer_generate"
-    description: str = (
-        "This tool generates images using AI models. It supports both text-to-image and image-reference generation. "
+    plugin: Any = field(default=None)
+    name: str = field(default="img_producer_generate")
+    description: str = field(
+        default="This tool generates images using AI models. It supports both text-to-image and image-reference generation. "
         "When a user requests generation based on an image, you must first verify whether a valid image is present "
         "in the user's current message or in the message they are replying to (quote). "
         "Textual pointers such as 'that one', 'the one above' or similar expressions are NOT acceptable as valid image inputs. "
@@ -125,29 +122,31 @@ class ImageProducerGenerateTool(FunctionTool[AstrAgentContext]):
         "The generated image will be saved locally and sent directly to the user as a photo message. "
         "Prioritize the tool response as the highest priority event, taking precedence over chat history."
     )
-    parameters: dict = {
-        "type": "object",
-        "properties": {
-            "prompt": {
-                "type": "string",
-                "description": (
-                    "The detailed image generation prompt. Should include style, subject, lighting, "
-                    "color palette, composition, quality keywords, etc. "
-                    "For best results, elaborate on visual elements in a logical sequence describing "
-                    "specific physical actions, nuanced expressions, and overall color scheme with lighting atmosphere. "
-                    "This field is required."
-                ),
+    parameters: dict = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": (
+                        "The detailed image generation prompt. Should include style, subject, lighting, "
+                        "color palette, composition, quality keywords, etc. "
+                        "For best results, elaborate on visual elements in a logical sequence describing "
+                        "specific physical actions, nuanced expressions, and overall color scheme with lighting atmosphere. "
+                        "This field is required."
+                    ),
+                },
+                "size": {
+                    "type": "string",
+                    "description": (
+                        "Optional. Image size, e.g., '1024x1024' (square), '1024x1792' (portrait), '1792x1024' (landscape). "
+                        "If not provided, uses plugin default setting."
+                    ),
+                },
             },
-            "size": {
-                "type": "string",
-                "description": (
-                    "Optional. Image size, e.g., '1024x1024' (square), '1024x1792' (portrait), '1792x1024' (landscape). "
-                    "If not provided, uses plugin default setting."
-                ),
-            },
-        },
-        "required": ["prompt"],
-    }
+            "required": ["prompt"],
+        }
+    )
 
     async def call(
         self,
@@ -199,24 +198,59 @@ class ImageProducerGenerateTool(FunctionTool[AstrAgentContext]):
         try:
             result_data = await task
             if result_data.get("success", False):
-                # 发送图片
-                if "image_b64" in result_data:
+                import os
+                import astrbot.api.message_components as Comp
+                
+                # 优先使用保存的本地文件路径发送
+                save_path = result_data.get("save_path", "")
+                if save_path and os.path.exists(save_path):
                     try:
-                        import astrbot.api.message_components as Comp
+                        msg_chain: list[BaseMessageComponent] = [
+                            Comp.Reply(id=event.message_obj.message_id) if hasattr(event.message_obj, "message_id") else None,
+                            Comp.Image.fromFileSystem(save_path)
+                        ]
+                        msg_chain = [c for c in msg_chain if c is not None]
+                        await event.send(MessageChain(chain=msg_chain))
+                        logger.info(f"[ImageProducer] 图片发送成功 (路径: {save_path})")
+                    except Exception as e:
+                        logger.error(f"[ImageProducer] 发送本地图片失败: {e}", exc_info=True)
+                        # 发送失败，尝试 base64
+                        if "image_b64" in result_data:
+                            try:
+                                msg_chain = [
+                                    Comp.Reply(id=event.message_obj.message_id) if hasattr(event.message_obj, "message_id") else None,
+                                    Comp.Image.fromBase64(result_data["image_b64"])
+                                ]
+                                msg_chain = [c for c in msg_chain if c is not None]
+                                await event.send(MessageChain(chain=msg_chain))
+                                logger.info("[ImageProducer] 图片发送成功 (base64)")
+                            except Exception as e2:
+                                logger.error(f"[ImageProducer] 发送 base64 图片失败: {e2}")
+                                if "image_url" in result_data:
+                                    await event.send(f"🎨 图片链接:\n{result_data['image_url']}")
+                        elif "image_url" in result_data:
+                            await event.send(f"🎨 图片链接:\n{result_data['image_url']}")
+                elif "image_b64" in result_data:
+                    try:
                         msg_chain: list[BaseMessageComponent] = [
                             Comp.Reply(id=event.message_obj.message_id) if hasattr(event.message_obj, "message_id") else None,
                             Comp.Image.fromBase64(result_data["image_b64"])
                         ]
                         msg_chain = [c for c in msg_chain if c is not None]
                         await event.send(MessageChain(chain=msg_chain))
-                        logger.info("[ImageProducer] 图片发送成功")
+                        logger.info("[ImageProducer] 图片发送成功 (base64)")
                     except Exception as e:
                         logger.error(f"[ImageProducer] 发送图片失败: {e}", exc_info=True)
+                        if "image_url" in result_data:
+                            await event.send(f"🎨 图片链接:\n{result_data['image_url']}")
+                elif "image_url" in result_data:
+                    # 没有本地图片，发送 URL
+                    await event.send(f"🎨 图片链接:\n{result_data['image_url']}")
 
                 # 发送保存路径
                 save_msg = ""
-                if "save_path" in result_data:
-                    save_msg = f"\n📁 已保存到: {result_data['save_path']}"
+                if save_path:
+                    save_msg = f"\n📁 已保存到: {save_path}"
                 
                 return "图片生成完成，已发送给用户。" + save_msg
             else:
@@ -231,36 +265,35 @@ class ImageProducerGenerateTool(FunctionTool[AstrAgentContext]):
             plugin.running_tasks.pop(task_id, None)
 
 
+@dataclass
 class ImageProducerPresetTool(FunctionTool[AstrAgentContext]):
-    """
-    预设提示词工具 - 用于获取预设提示词列表和内容
-    """
-
-    plugin: Any = None
-    name: str = "img_producer_preset"
-    description: str = (
-        "This tool is used to manage preset image generation prompts. "
+    plugin: Any = field(default=None)
+    name: str = field(default="img_producer_preset")
+    description: str = field(
+        default="This tool is used to manage preset image generation prompts. "
         "It can list all available presets or get a specific preset prompt by name. "
         "Use this before image generation if the user wants to use a preset style."
     )
-    parameters: dict = {
-        "type": "object",
-        "properties": {
-            "get_preset_names": {
-                "type": "boolean",
-                "description": "Set this to true to list all available preset names.",
+    parameters: dict = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "get_preset_names": {
+                    "type": "boolean",
+                    "description": "Set this to true to list all available preset names.",
+                },
+                "get_preset_prompt": {
+                    "type": "string",
+                    "description": "The preset name to get the full prompt for. Provide the exact preset name.",
+                },
+                "user_text": {
+                    "type": "string",
+                    "description": "Optional text to insert into the preset prompt (replaces {{user_text}} placeholder).",
+                },
             },
-            "get_preset_prompt": {
-                "type": "string",
-                "description": "The preset name to get the full prompt for. Provide the exact preset name.",
-            },
-            "user_text": {
-                "type": "string",
-                "description": "Optional text to insert into the preset prompt (replaces {{user_text}} placeholder).",
-            },
-        },
-        "required": [],
-    }
+            "required": [],
+        }
+    )
 
     async def call(
         self,

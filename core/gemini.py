@@ -16,13 +16,19 @@ class GeminiProvider(BaseProvider):
     supported_qualities = ["standard", "hd"]
     supported_styles = ["vivid", "natural", "artistic"]
 
-    def _get_api_config(self) -> Tuple[str, str]:
-        """获取当前可用的 API 配置"""
+    def _get_api_config(self, use_vision: bool = False) -> Tuple[str, str]:
+        """获取当前可用的 API 配置
+        
+        Args:
+            use_vision: 是否使用视觉模型配置（backup_api_key/backup_api_url）
+        """
         main_key = self.config.get("main_api_key", "")
         main_url = self.config.get("main_api_url", "")
         backup_key = self.config.get("backup_api_key", "")
         backup_url = self.config.get("backup_api_url", "")
 
+        if use_vision and backup_key and backup_url:
+            return backup_key, backup_url
         if main_key and main_url:
             return main_key, main_url
         if backup_key and backup_url:

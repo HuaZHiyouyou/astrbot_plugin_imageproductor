@@ -19,9 +19,26 @@ class StepFunVisionProvider(BaseProvider):
         super().__init__(config, session)
         self.model = self.config.get("model", "step-1v-8k")
 
-    def _get_api_config(self) -> Tuple[str, str]:
-        api_key = self.config.get("main_api_key", "") or self.config.get("backup_api_key", "")
-        api_url = self.config.get("main_api_url", "") or self.config.get("backup_api_url", "")
+    def _get_api_config(self, use_vision: bool = False) -> Tuple[str, str]:
+        """获取当前可用的 API 配置
+        
+        Args:
+            use_vision: 是否使用视觉模型配置（backup_api_key/backup_api_url）
+        """
+        main_key = self.config.get("main_api_key", "")
+        main_url = self.config.get("main_api_url", "")
+        backup_key = self.config.get("backup_api_key", "")
+        backup_url = self.config.get("backup_api_url", "")
+
+        if use_vision and backup_key and backup_url:
+            return backup_key, backup_url
+        if main_key and main_url:
+            return main_key, main_url
+        if backup_key and backup_url:
+            return backup_key, backup_url
+
+        api_key = main_key or backup_key
+        api_url = main_url or backup_url
         if not api_url:
             api_url = "https://api.stepfun.com"
         return api_key, api_url
