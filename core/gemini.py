@@ -1,14 +1,15 @@
 """
-Google Gemini Imagen 图像生成 Provider
+Google Gemini 图像生成 Provider (支持以图生图)
 """
 
-from typing import Tuple, Dict, Any
+import base64
+from typing import Tuple, Dict, Any, List
 
 from .base import BaseProvider, ImageResult
 
 
 class GeminiProvider(BaseProvider):
-    """Google Gemini Imagen 图像生成提供商"""
+    """Google Gemini 图像生成提供商 (支持多模态输入)"""
 
     provider_name = "gemini"
     supported_sizes = ["512x512", "1024x1024", "1792x1024", "1024x1792", "2048x2048"]
@@ -28,6 +29,43 @@ class GeminiProvider(BaseProvider):
             return backup_key, backup_url
         return main_key or backup_key, main_url or backup_url
 
+    def _build_gemini_context(
+        self,
+        model: str,
+        image_b64_list: List[tuple],
+        prompt: str,
+    ) -> dict:
+        """构建 Gemini 多模态请求上下文"""
+        parts = []
+        for mime, b64 in image_b64_list:
+            parts.append({
+                "inlineData": {
+                    "mimeType": mime,
+                    "data": b64,
+                }
+            })
+        parts.insert(0, {"text": prompt})
+
+        return {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": parts,
+                }
+            ],
+            "generationConfig": {
+                "temperature": 1,
+                "topP": 0.95,
+                "maxOutputTokens": 8192,
+            },
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF"},
+            ],
+        }
+
     async def generate_image(
         self,
         prompt: str,
@@ -40,45 +78,57 @@ class GeminiProvider(BaseProvider):
         image_b64_list: list = None,
         **kwargs
     ) -> ImageResult:
-        """调用 Google Imagen API 生成图像"""
+        """调用 Google Gemini API 生成图像 (支持多模态输入)"""
         try:
             api_key, api_url = self._get_api_config()
             if not api_key:
                 return ImageResult(success=False, error="API Key 未配置")
 
-            model = model or self.config.get("model", "imagen-3.0-generate-002")
+            model = model or self.config.get("model", "gemini-2.0-flash-preview-image")
             width, height = self._parse_size(size)
 
-            url = f"{api_url}/v1beta/imagen:generateImage"
-
-            payload = {
-                "model": model,
-                "prompt": prompt,
-                "imageSize": {
-                    "width": width,
-                    "height": height
-                },
-                "personGeneration": "dont_allow"
-            }
+            url = f"{api_url}/{model}:generateContent"
 
             headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
+                "x-goog-api-key": api_key,
             }
+
+            if image_b64_list and len(image_b64_list) > 0:
+                payload = self._build_gemini_context(model, image_b64_list, prompt)
+            else:
+                payload = {
+                    "contents": [
+                        {
+                            "role": "user",
+                            "parts": [{"text": prompt}],
+                        }
+                    ],
+                    "generationConfig": {
+                        "responseModalities": ["IMAGE"],
+                    },
+                }
 
             async with self.session.post(url, headers=headers, json=payload) as response:
                 if response.status == 200:
                     result = await response.json()
-                    image_url = result.get("image", {}).get("url", "")
-                    if image_url:
-                        return ImageResult(success=True, image_url=image_url)
-                    return ImageResult(success=False, error="未返回图像 URL")
+                    b64_images = []
+                    for item in result.get("candidates", []):
+                        parts = item.get("content", {}).get("parts", [])
+                        for part in parts:
+                            if "inlineData" in part and "data" in part["inlineData"]:
+                                data = part["inlineData"]
+                                b64_images.append((data["mimeType"], data["data"]))
+
+                    if b64_images:
+                        return ImageResult(success=True, b64_json=b64_images[0][1])
+                    return ImageResult(success=False, error="未返回图像数据")
                 else:
                     error_text = await response.text()
                     return ImageResult(success=False, error=f"API 错误: {response.status} - {error_text}")
 
         except Exception as e:
-            return ImageResult(success=False, error=str(e))
+            return ImageResult(success=False, error=f"生成图像异常: {str(e)}")
 
     async def test_connection(
         self,

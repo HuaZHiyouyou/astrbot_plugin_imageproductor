@@ -12,6 +12,10 @@ from .qianwen import QianwenProvider
 from .baidu import BaiduProvider
 from .hunyuan import HunyuanProvider
 from .stable_diffusion import StableDiffusionProvider
+from .claude_vision import ClaudeVisionProvider
+from .deepseek_vision import DeepSeekVisionProvider
+from .volcano_vision import VolcanoVisionProvider
+from .stepfun_vision import StepFunVisionProvider
 
 __all__ = [
     "BaseProvider",
@@ -26,4 +30,8 @@ __all__ = [
     "BaiduProvider",
     "HunyuanProvider",
     "StableDiffusionProvider",
+    "ClaudeVisionProvider",
+    "DeepSeekVisionProvider",
+    "VolcanoVisionProvider",
+    "StepFunVisionProvider",
 ]

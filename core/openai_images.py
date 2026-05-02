@@ -1,15 +1,19 @@
 """
-OpenAI DALL-E 图像生成 Provider
+OpenAI 图像生成 Provider (整合普通生成和Chat模式)
+支持：
+1. 普通模式：使用 DALL-E API 生成图像
+2. Chat模式：使用 GPT-4o Vision 直接生成图像
+当有参考图片时自动切换到Chat模式
 """
 
-import base64
-from typing import Tuple, Dict, Any
+import re
+from typing import Tuple, List
 
 from .base import BaseProvider, ImageResult
 
 
 class OpenAIProvider(BaseProvider):
-    """OpenAI DALL-E 图像生成提供商"""
+    """OpenAI 图像生成提供商 (支持普通模式和Chat模式自动切换)"""
 
     provider_name = "openai"
     supported_sizes = ["256x256", "512x512", "1024x1024", "1792x1024", "1024x1792"]
@@ -39,65 +43,185 @@ class OpenAIProvider(BaseProvider):
             return backup_key, backup_url
         return main_key or backup_key, main_url or backup_url
 
-    async def generate_image(
+    async def _generate_with_chat_api(
         self,
         prompt: str,
-        size: str = "1024x1024",
-        quality: str = "standard",
-        style: str = "vivid",
-        model: str = "",
-        api_key: str = "",
-        api_url: str = "",
-        image_b64_list: list = None,
+        model: str,
+        api_key: str,
+        api_url: str,
+        image_b64_list: List[tuple],
         **kwargs
     ) -> ImageResult:
-        """调用 OpenAI DALL-E API 生成图像"""
-        try:
-            api_key, api_url = self._get_api_config()
-            if not api_key:
-                return ImageResult(success=False, error="API Key 未配置")
+        """使用Chat接口生成图像（适合有参考图片的场景）"""
+        from astrbot.api import logger
 
-            model = model or self.config.get("model", "dall-e-3")
-            width, height = self._parse_size(size)
+        content_parts = []
 
-            if image_b64_list and len(image_b64_list) > 0:
-                return await self._generate_with_image(
-                    api_url=api_url,
-                    api_key=api_key,
-                    model=model,
-                    prompt=prompt,
-                    image_b64_list=image_b64_list,
-                    size=f"{width}x{height}",
-                    quality=quality,
-                    style=style
-                )
+        if image_b64_list and len(image_b64_list) > 0:
+            logger.info(f"[ImageProducer] OpenAI Chat检测到 {len(image_b64_list)} 张参考图片")
+            for i, (mime, b64_data) in enumerate(image_b64_list, start=1):
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{mime};base64,{b64_data}",
+                        "detail": "high"
+                    }
+                })
+                logger.info(f"[ImageProducer] 已添加第 {i} 张参考图片到请求")
+
+            content_parts.append({
+                "type": "text",
+                "text": f"""你是一个专业的图像生成提示词工程师。请根据参考图片和用户需求，生成一个极其详细的英文图像生成提示词。
+
+【重要规则】
+1. 必须准确描述参考图片的所有视觉元素：主体、颜色、构图、风格、光线、氛围、背景等
+2. 用户需求应该融入参考图片的视觉风格中，而不是替代它
+3. 生成的提示词必须以英文撰写
+4. 提示词应该足够详细（50-200个单词）
+
+用户需求：{prompt}
+
+请直接返回英文提示词，不要有任何其他内容。"""
+            })
+        else:
+            content_parts.append({
+                "type": "text",
+                "text": f"""你是一个专业的图像生成提示词工程师。请根据用户需求生成一个详细的英文图像生成提示词。
+
+用户需求：{prompt}
+
+请直接返回英文提示词，不要有任何其他内容。"""
+            })
+
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": content_parts
+                }
+            ],
+            "max_tokens": 2000
+        }
+
+        url = f"{api_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+
+        logger.info(f"[ImageProducer] 正在调用OpenAI Chat API...")
+
+        async with self.session.post(url, headers=headers, json=payload) as response:
+            if response.status == 200:
+                result = await response.json()
+                logger.info(f"[ImageProducer] OpenAI Chat API返回: {result}")
+
+                if "choices" in result and len(result["choices"]) > 0:
+                    content = result["choices"][0]["message"]["content"]
+
+                    match = re.search(r"!\[.*?\]\((.*?)\)", content)
+                    if match:
+                        img_src = match.group(1)
+                        if img_src.startswith("data:image/"):
+                            header, b64_data = img_src.split(",", 1)
+                            logger.info(f"[ImageProducer] 成功从OpenAI Chat响应中提取图片")
+                            return ImageResult(success=True, b64_json=b64_data)
+                        else:
+                            logger.info(f"[ImageProducer] 从OpenAI Chat响应获取到URL图片")
+                            return ImageResult(success=True, image_url=img_src)
+
+                    logger.warning(f"[ImageProducer] OpenAI Chat未返回图片")
+                    return ImageResult(success=False, error=f"OpenAI Chat未返回图片")
+
+                return ImageResult(success=False, error="OpenAI Chat API返回格式异常")
             else:
-                return await self._generate_text_only(
-                    api_url=api_url,
-                    api_key=api_key,
-                    model=model,
-                    prompt=prompt,
-                    width=width,
-                    height=height,
-                    quality=quality,
-                    style=style
-                )
+                error_text = await response.text()
+                logger.error(f"[ImageProducer] OpenAI Chat API错误: {response.status} - {error_text}")
+                return ImageResult(success=False, error=f"API 错误: {response.status}")
 
-        except Exception as e:
-            return ImageResult(success=False, error=str(e))
-
-    async def _generate_text_only(
+    async def _analyze_reference_images(
         self,
         api_url: str,
         api_key: str,
-        model: str,
+        image_b64_list: List[tuple],
+        original_prompt: str
+    ) -> str:
+        """使用 GPT-4o Vision 分析参考图片，生成详细提示词"""
+        try:
+            url = f"{api_url}/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+
+            content_parts = []
+            for mime, b64_data in image_b64_list:
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{mime};base64,{b64_data}",
+                        "detail": "high"
+                    }
+                })
+
+            content_parts.append({
+                "type": "text",
+                "text": f"""Please analyze this reference image(s) and create a detailed image generation prompt.
+The user wants to generate: {original_prompt}
+
+Based on the reference image(s), create a detailed prompt that:
+1. Describes the visual style, composition, and mood
+2. Preserves key visual elements from the reference
+3. Incorporates the user's request: {original_prompt}
+
+Only return the prompt text, nothing else. The prompt should be in English and detailed enough for image generation."""
+            })
+
+            payload = {
+                "model": "gpt-4o",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": content_parts
+                    }
+                ],
+                "max_tokens": 1000
+            }
+
+            async with self.session.post(url, headers=headers, json=payload) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    if "choices" in result and len(result["choices"]) > 0:
+                        enhanced_prompt = result["choices"][0]["message"]["content"].strip()
+                        return enhanced_prompt
+
+            return original_prompt
+        except Exception as e:
+            from astrbot.api import logger
+            logger.warning(f"[ImageProducer] 分析参考图片失败: {e}")
+            return original_prompt
+
+    async def _generate_with_images_api(
+        self,
         prompt: str,
-        width: int,
-        height: int,
-        quality: str,
-        style: str
+        model: str,
+        size: str,
+        api_key: str,
+        api_url: str,
+        image_b64_list: List[tuple] = None,
+        **kwargs
     ) -> ImageResult:
-        """纯文字生成图像"""
+        """使用普通图像生成API生成图像"""
+        width, height = self._parse_size(size)
+
+        if image_b64_list and len(image_b64_list) > 0:
+            enhanced_prompt = await self._analyze_reference_images(
+                api_url, api_key, image_b64_list, prompt
+            )
+        else:
+            enhanced_prompt = prompt
+
         url = f"{api_url}/images/generations"
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -106,7 +230,7 @@ class OpenAIProvider(BaseProvider):
 
         payload = {
             "model": model,
-            "prompt": prompt,
+            "prompt": enhanced_prompt,
             "n": 1,
             "size": f"{width}x{height}",
         }
@@ -119,8 +243,8 @@ class OpenAIProvider(BaseProvider):
         elif is_custom:
             pass
         else:
-            payload["quality"] = quality
-            payload["style"] = style
+            payload["quality"] = kwargs.get("quality", "standard")
+            payload["style"] = kwargs.get("style", "vivid")
 
         if model == "dall-e-2":
             payload.pop("quality", None)
@@ -141,82 +265,48 @@ class OpenAIProvider(BaseProvider):
                 error_text = await response.text()
                 return ImageResult(success=False, error=f"API 错误: {response.status} - {error_text}")
 
-    async def _generate_with_image(
+    async def generate_image(
         self,
-        api_url: str,
-        api_key: str,
-        model: str,
         prompt: str,
-        image_b64_list: list,
-        size: str,
-        quality: str,
-        style: str
+        size: str = "1024x1024",
+        quality: str = "standard",
+        style: str = "vivid",
+        model: str = "",
+        api_key: str = "",
+        api_url: str = "",
+        image_b64_list: list = None,
+        auto_switch_mode: bool = True,
+        **kwargs
     ) -> ImageResult:
-        """以图生图（编辑参考图）"""
-        import base64
-        from io import BytesIO
-        from PIL import Image
-        from curl_cffi import CurlMime
-
-        url = f"{api_url}/images/edits"
-        headers = {"Authorization": f"Bearer {api_key}"}
-
-        payload = {
-            "model": model,
-            "prompt": prompt,
-        }
-
-        multipart = CurlMime()
-        for index, (mime, b64_data) in enumerate(image_b64_list, start=1):
-            raw_bytes = base64.b64decode(b64_data)
-            try:
-                with Image.open(BytesIO(raw_bytes)) as img:
-                    if getattr(img, "is_animated", False):
-                        img.seek(0)
-                    img = img.convert("RGB")
-                    buf = BytesIO()
-                    img.save(buf, format="JPEG", quality=100)
-                    file_content = buf.getvalue()
-                    file_mime = "image/jpeg"
-            except Exception:
-                if mime in {"image/jpeg", "image/jpg", "image/png", "image/webp"}:
-                    file_content = raw_bytes
-                    file_mime = mime
-                else:
-                    return ImageResult(success=False, error="不支持的图片格式")
-
-            multipart.addpart(
-                name="image",
-                content_type=file_mime,
-                filename=f"image_{index}.jpg",
-                data=file_content
-            )
-
-            if prompt:
-                multipart.addpart(
-                    name="prompt",
-                    content_type="text/plain",
-                    data=prompt.encode("utf-8")
-                )
+        """调用 OpenAI API 生成图像
+        智能模式：当有参考图片时自动使用Chat模式，否则使用普通模式
+        """
+        from astrbot.api import logger
 
         try:
-            async with self.session.post(url, headers=headers, data=payload, multipart=multipart) as response:
-                multipart.close()
-                if response.status == 200:
-                    result = await response.json()
-                    if "data" in result and len(result["data"]) > 0:
-                        if "url" in result["data"][0]:
-                            image_url = result["data"][0]["url"]
-                            return ImageResult(success=True, image_url=image_url)
-                        elif "b64_json" in result["data"][0]:
-                            b64_data = result["data"][0]["b64_json"]
-                            return ImageResult(success=True, b64_json=b64_data)
-                    return ImageResult(success=False, error="API 返回格式异常")
-                else:
-                    error_text = await response.text()
-                    return ImageResult(success=False, error=f"API 错误: {response.status} - {error_text}")
+            api_key, api_url = self._get_api_config()
+            if not api_key:
+                return ImageResult(success=False, error="API Key 未配置")
+
+            has_images = bool(image_b64_list and len(image_b64_list) > 0)
+
+            if has_images and auto_switch_mode:
+                logger.info(f"[ImageProducer] 检测到参考图片，自动切换到Chat模式")
+                vision_model = model or self.config.get("vision_model", "gpt-4o")
+                return await self._generate_with_chat_api(
+                    prompt, vision_model, api_key, api_url, image_b64_list, **kwargs
+                )
+            else:
+                logger.info(f"[ImageProducer] 使用普通图像生成模式")
+                gen_model = model or self.config.get("model", "dall-e-3")
+                return await self._generate_with_images_api(
+                    prompt, gen_model, size, api_key, api_url, image_b64_list,
+                    quality=quality, style=style, **kwargs
+                )
+
         except Exception as e:
-            return ImageResult(success=False, error=f"以图生图请求失败: {str(e)}")
+            logger.error(f"[ImageProducer] OpenAI生成图片失败: {e}", exc_info=True)
+            return ImageResult(success=False, error=str(e))
 
     async def test_connection(
         self,
@@ -229,13 +319,7 @@ class OpenAIProvider(BaseProvider):
             if not api_key:
                 return False, "API Key 未配置"
 
-            is_zhipu = self._is_zhipu_compatible(api_url)
-
-            if is_zhipu:
-                url = f"{api_url}/models"
-            else:
-                url = f"{api_url}/models"
-
+            url = f"{api_url}/models"
             headers = {
                 "Authorization": f"Bearer {api_key}",
             }

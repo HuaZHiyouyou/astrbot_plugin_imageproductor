@@ -21,6 +21,7 @@ from astrbot.api import logger
 from astrbot.core import AstrBotConfig
 from astrbot.core.message.components import BaseMessageComponent
 from astrbot.core.message.message_event_result import MessageChain
+from astrbot.core.utils.session_waiter import SessionController, session_waiter
 
 from .core import (
     BaseProvider,
@@ -34,8 +35,12 @@ from .core import (
     BaiduProvider,
     HunyuanProvider,
     StableDiffusionProvider,
+    ClaudeVisionProvider,
+    DeepSeekVisionProvider,
+    VolcanoVisionProvider,
+    StepFunVisionProvider,
 )
-from .core.llm_tools import ImageProducerPromptTool, ImageProducerGenerateTool
+from .core.llm_tools import ImageProducerPromptTool, ImageProducerGenerateTool, ImageProducerPresetTool
 
 
 # 支持的图片文件格式
@@ -51,7 +56,29 @@ SUPPORTED_FILE_FORMATS_WITH_DOT = (
     ".mpo",
 )
 
-PROVIDER_LIST = ["openai", "gemini", "grok", "seed", "zhipu", "qianwen", "baidu", "hunyuan", "stable_diffusion"]
+# API类型到Provider名称的映射
+API_TYPE_TO_PROVIDER = {
+    "OpenAI": "openai",
+    "Gemini": "gemini",
+    "Grok": "grok",
+    "Zhipu": "zhipu",
+    "Qianwen": "qianwen",
+    "Baidu": "baidu",
+    "Hunyuan": "hunyuan",
+    "Seed": "seed",
+    "Stable_Diffusion": "stable_diffusion",
+}
+
+# 平台到视觉模型Provider的映射
+PLATFORM_TO_VISION_PROVIDER = {
+    "OpenAI": "openai",
+    "Gemini": "gemini",
+    "Grok": "grok",
+    "Zhipu": "zhipu",
+    "Qianwen": "qianwen",
+    "Baidu": "baidu",
+    "Hunyuan": "hunyuan",
+}
 
 PROVIDER_CLASS_MAP = {
     "openai": OpenAIProvider,
@@ -63,6 +90,10 @@ PROVIDER_CLASS_MAP = {
     "baidu": BaiduProvider,
     "hunyuan": HunyuanProvider,
     "stable_diffusion": StableDiffusionProvider,
+    "claude_vision": ClaudeVisionProvider,
+    "deepseek_vision": DeepSeekVisionProvider,
+    "volcano_vision": VolcanoVisionProvider,
+    "stepfun_vision": StepFunVisionProvider,
 }
 
 
@@ -73,80 +104,133 @@ class ImageProducer(Star):
 
         self.provider_configs: Dict[str, Dict[str, Any]] = {}
 
-        self.prefix_enabled: bool = self.conf.get("prefix_enabled", False)
-        prefix_list_str: str = self.conf.get("prefix_list", "")
+        prefix_config = self.conf.get("prefix_config", {}).get("items", {})
+        self.prefix_enabled: bool = prefix_config.get("prefix_enabled", False)
+        prefix_list_str: str = prefix_config.get("prefix_list", "/img,/aimg")
         self.prefix_list: list = [p.strip() for p in prefix_list_str.split(",") if p.strip()] if prefix_list_str else []
-        self.coexist_enabled: bool = self.conf.get("prefix_coexist", False)
+        self.coexist_enabled: bool = prefix_config.get("coexist_enabled", False)
 
-        self.group_whitelist_enabled: bool = self.conf.get("whitelist_enabled", False)
-        group_whitelist_str: str = self.conf.get("group_whitelist", "")
+        whitelist_config = self.conf.get("whitelist_config", {}).get("items", {})
+        self.group_whitelist_enabled: bool = whitelist_config.get("whitelist_enabled", False)
+        group_whitelist_str: str = whitelist_config.get("whitelist_groups", "")
         self.group_whitelist: list = [g.strip() for g in group_whitelist_str.split(",") if g.strip()] if group_whitelist_str else []
-        self.user_whitelist_enabled: bool = self.conf.get("user_whitelist_enabled", False)
-        user_whitelist_str: str = self.conf.get("user_whitelist", "")
-        self.user_whitelist: list = [u.strip() for u in user_whitelist_str.split(",") if u.strip()] if user_whitelist_str else []
+        self.user_whitelist_enabled: bool = whitelist_config.get("user_enabled", False)
+        self.user_whitelist: list = []
 
         self.provider_map: Dict[str, BaseProvider] = {}
 
         data_dir = StarTools.get_data_dir("astrbot_plugin_imageproductor")
         self.ai_images_dir = data_dir / "ai_images"
+        self.refer_images_dir = data_dir / "refer_images"
         self.save_dir = data_dir / "save_images"
         os.makedirs(self.ai_images_dir, exist_ok=True)
+        os.makedirs(self.refer_images_dir, exist_ok=True)
         os.makedirs(self.save_dir, exist_ok=True)
 
         self.session: Optional[aiohttp.ClientSession] = None
 
-        self.default_platform = self.conf.get("default_platform", "openai")
-        self.default_size = self.conf.get("default_size", "1024x1024")
-        self.default_quality = self.conf.get("default_quality", "standard")
-        self.default_style = self.conf.get("default_style", "vivid")
-        self.max_concurrent_jobs = self.conf.get("max_concurrent_jobs", 5)
-        self.enable_nsfw_filter = self.conf.get("enable_nsfw_filter", True)
-        self.auto_save_images = self.conf.get("auto_save_images", True)
-        self.save_images = self.conf.get("save_images", True)
+        common_config = self.conf.get("common_config", {}).get("items", {})
+
+        provider_type = "OpenAI"
+        self.default_platform = "openai"
+        self.auto_switch_mode = True
+        self.default_size = common_config.get("default_size", "1024x1024")
+        self.default_quality = common_config.get("default_quality", "standard")
+        self.default_style = common_config.get("default_style", "vivid")
+        self.max_concurrent_jobs = common_config.get("max_concurrent_jobs", 5)
+        self.enable_nsfw_filter = common_config.get("enable_nsfw_filter", True)
+        self.auto_save_images = common_config.get("auto_save_images", True)
+        self.save_images = common_config.get("auto_save_images", True)
+        self.max_retry = common_config.get("max_retry", 3)
+        self.proxy = common_config.get("proxy", "")
+        self.timeout = common_config.get("timeout", 300)
+
+        gather_mode_config = self.conf.get("gather_mode_config", {}).get("items", {})
+        self.gather_mode_enabled = gather_mode_config.get("gather_mode_enabled", False)
+
+        llm_tool_settings = self.conf.get("llm_tool_settings", {}).get("items", {})
+        self.llm_tool_enabled = llm_tool_settings.get("llm_tool_enabled", False)
+
+        self.refer_images = ""  # 暂时为空，预留功能
+        self.preset_prompt_list = self.conf.get("preset_prompts", [])
+        self.preset_prompt_dict: Dict[str, str] = {}
+        self.parse_preset_prompts()
 
         self.semaphore = asyncio.Semaphore(self.max_concurrent_jobs)
-        
-        # 正在运行的任务
         self.running_tasks: Dict[str, asyncio.Task] = {}
 
     async def initialize(self):
-        self.session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=120)
-        )
+        session_kwargs = {
+            "timeout": aiohttp.ClientTimeout(total=self.timeout)
+        }
+        if self.proxy:
+            session_kwargs["proxy"] = self.proxy
+            logger.info(f"[ImageProducer] 已配置代理: {self.proxy}")
+        self.session = aiohttp.ClientSession(**session_kwargs)
         self.init_providers()
 
-        # 检查配置是否启用函数调用工具
-        if self.conf.get("llm_tool_enabled", False):
-            # 注册两个工具
+        if self.llm_tool_enabled:
             self.context.add_llm_tools(ImageProducerGenerateTool(plugin=self))
             logger.info("[ImageProducer] 已注册 LLM 工具: img_producer_generate")
             
             self.context.add_llm_tools(ImageProducerPromptTool(plugin=self))
             logger.info("[ImageProducer] 已注册 LLM 工具: img_producer_prompt")
+            
+            self.context.add_llm_tools(ImageProducerPresetTool(plugin=self))
+            logger.info("[ImageProducer] 已注册 LLM 工具: img_producer_preset")
 
     def init_providers(self):
-        for provider_name in PROVIDER_LIST:
-            enabled_key = f"{provider_name}_enabled"
-            if not self.conf.get(enabled_key, False):
-                continue
+        """从配置结构初始化Providers"""
+        provider_keys = ["main_provider", "back_provider", "back_provider2", "back_provider3", "back_provider4", "back_provider5"]
+        is_main = True
 
-            provider_config = {
-                "enabled": True,
-                "model": self.conf.get(f"{provider_name}_model", ""),
-                "main_api_key": self.conf.get(f"{provider_name}_main_api_key", ""),
-                "main_api_url": self.conf.get(f"{provider_name}_main_api_url", ""),
-                "backup_api_key": self.conf.get(f"{provider_name}_backup_api_key", ""),
-                "backup_api_url": self.conf.get(f"{provider_name}_backup_api_url", ""),
-            }
+        for key in provider_keys:
+            provider_container = self.conf.get(key, {})
+            provider_obj = provider_container.get("items", {})
+            if isinstance(provider_obj, dict) and provider_obj.get("enabled", False):
+                self._init_single_provider(provider_obj, is_main=is_main)
+            is_main = False
 
-            if not provider_config["main_api_key"] and not provider_config["backup_api_key"]:
-                continue
+    def _init_single_provider(self, provider_obj: Dict[str, Any], is_main: bool = True):
+        """初始化单个提供商"""
+        api_type = provider_obj.get("api_type", "")
+        provider_name = API_TYPE_TO_PROVIDER.get(api_type)
 
-            provider_class = PROVIDER_CLASS_MAP.get(provider_name)
-            if provider_class and self.session:
-                self.provider_map[provider_name] = provider_class(provider_config, self.session)
-                self.provider_configs[provider_name] = provider_config
-                logger.info(f"[ImageGen] 已加载 provider: {provider_name}")
+        if not provider_name:
+            logger.warning(f"[ImageProducer] 不支持的API类型: {api_type}")
+            return
+
+        api_key = provider_obj.get("api_key", "")
+        if not api_key:
+            logger.warning(f"[ImageProducer] {provider_obj.get('api_name', '提供商')} 未配置API密钥")
+            return
+
+        provider_class = PROVIDER_CLASS_MAP.get(provider_name)
+        if not provider_class:
+            logger.warning(f"[ImageProducer] 未找到Provider类: {provider_name}")
+            return
+
+        provider_config = {
+            "enabled": True,
+            "model": provider_obj.get("model", ""),
+            "vision_model": provider_obj.get("vision_model", ""),
+            "main_api_key": api_key,
+            "main_api_url": provider_obj.get("api_url", ""),
+            "backup_api_key": provider_obj.get("vision_api_key", ""),
+            "backup_api_url": provider_obj.get("vision_api_url", ""),
+            "api_name": provider_obj.get("api_name", "主提供商" if is_main else "备用提供商"),
+            "auto_switch": provider_obj.get("auto_switch", True),
+        }
+
+        if self.session:
+            provider_instance = provider_class(provider_config, self.session)
+            self.provider_map[provider_name] = provider_instance
+            self.provider_configs[provider_name] = provider_config
+            logger.info(f"[ImageProducer] 已加载 {'主' if is_main else '备用'} provider: {provider_name} ({provider_config['api_name']})")
+
+            if is_main:
+                self.default_platform = provider_name
+                self.auto_switch_mode = provider_config.get("auto_switch", True)
 
     def is_global_admin(self, event: AstrMessageEvent) -> bool:
         try:
@@ -170,6 +254,94 @@ class ImageProducer(Star):
             return user_id in self.user_whitelist
         return True
 
+    def parse_preset_prompts(self):
+        """解析预设提示词"""
+        self.preset_prompt_dict = {}
+        for item in self.preset_prompt_list:
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                tokens = item.split(maxsplit=1)
+                if len(tokens) < 2:
+                    logger.warning(f"[ImageProducer] 预设提示词格式错误（缺少提示词内容）: {item}")
+                    continue
+                
+                trigger_raw = tokens[0]
+                prompt_content = tokens[1]
+                
+                # 解析触发词
+                trigger_list = []
+                if trigger_raw.startswith("[") and trigger_raw.endswith("]"):
+                    # 多触发词
+                    trigger_list = [t.strip() for t in trigger_raw[1:-1].split(",") if t.strip()]
+                else:
+                    # 单触发词
+                    trigger_list = [trigger_raw]
+                
+                # 注册触发词
+                for trigger in trigger_list:
+                    if trigger:
+                        self.preset_prompt_dict[trigger] = prompt_content
+                        logger.debug(f"[ImageProducer] 已注册预设触发词: {trigger}")
+            except Exception as e:
+                logger.warning(f"[ImageProducer] 解析预设提示词失败: {item}, 错误: {e}")
+        logger.info(f"[ImageProducer] 已加载 {len(self.preset_prompt_dict)} 个预设触发词")
+
+    async def _load_refer_images(self) -> List[Tuple[str, str]]:
+        """加载预设参考图片"""
+        image_b64_list: List[Tuple[str, str]] = []
+        if not self.refer_images:
+            return image_b64_list
+
+        filenames = [f.strip() for f in self.refer_images.split(",") if f.strip()]
+        for filename in filenames:
+            try:
+                path = self.refer_images_dir / filename
+                if path.exists():
+                    mime_type = self._get_mime_type(filename)
+                    with open(path, "rb") as f:
+                        b64_data = base64.b64encode(f.read()).decode("utf-8")
+                    image_b64_list.append((mime_type, b64_data))
+                    logger.info(f"[ImageProducer] 已加载预设参考图片: {filename}")
+                else:
+                    logger.warning(f"[ImageProducer] 预设参考图片不存在: {filename}")
+            except Exception as e:
+                logger.error(f"[ImageProducer] 加载预设参考图片失败 {filename}: {e}")
+
+        if image_b64_list:
+            logger.info(f"[ImageProducer] 共加载 {len(image_b64_list)} 张预设参考图片")
+        return image_b64_list
+
+    def _get_mime_type(self, filename: str) -> str:
+        """根据文件扩展名获取MIME类型"""
+        ext = filename.lower().split(".")[-1] if "." in filename else ""
+        mime_map = {
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "png": "image/png",
+            "gif": "image/gif",
+            "webp": "image/webp",
+            "bmp": "image/bmp",
+        }
+        return mime_map.get(ext, "image/png")
+
+    def get_preset_prompt(self, trigger: str, user_text: str = "") -> Optional[str]:
+        """获取并处理预设提示词"""
+        if trigger not in self.preset_prompt_dict:
+            return None
+        
+        preset_prompt = self.preset_prompt_dict[trigger]
+        
+        # 替换占位符
+        if "{{user_text}}" in preset_prompt:
+            preset_prompt = preset_prompt.replace("{{user_text}}", user_text)
+        elif user_text:
+            # 如果没有占位符，但有用户文本，将用户文本添加到末尾
+            preset_prompt = f"{preset_prompt}, {user_text}"
+        
+        return preset_prompt
+
     def _get_message_text(self, event: AstrMessageEvent) -> str:
         if hasattr(event, 'message_str'):
             return event.message_str.strip()
@@ -191,6 +363,7 @@ class ImageProducer(Star):
         text = re.sub(r'^/aimg\s*', '', text, flags=re.IGNORECASE)
         text = re.sub(r'^/生图\s*', '', text, flags=re.IGNORECASE)
         text = re.sub(r'^/ai生图\s*', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bimg\s*', '', text, flags=re.IGNORECASE)
         return text.strip()
 
     def _extract_image_urls_from_event(self, event: AstrMessageEvent) -> List[str]:
@@ -199,6 +372,7 @@ class ImageProducer(Star):
         try:
             if hasattr(event, 'get_messages'):
                 for comp in event.get_messages():
+                    logger.debug(f"[ImageProducer] 消息组件类型: {type(comp).__name__}, 内容: {comp}")
                     if isinstance(comp, Comp.Reply) and hasattr(comp, 'chain'):
                         # 处理引用回复中的图片
                         for quote in comp.chain:
@@ -298,35 +472,35 @@ class ImageProducer(Star):
         try:
             tried_methods.append("event.send")
             await event.send(MessageChain().message(message))
-            logger.info(f"[ImageGen] 消息发送成功 (方法: event.send)")
+            logger.info(f"[ImageProducer] 消息发送成功 (方法: event.send)")
             return True
         except Exception as e:
             last_error = e
-            logger.warning(f"[ImageGen] event.send 失败: {e}")
+            logger.warning(f"[ImageProducer] event.send 失败: {e}")
         
         # 方法2: event.reply
         try:
             tried_methods.append("event.reply")
             await event.reply(MessageChain().message(message))
-            logger.info(f"[ImageGen] 消息发送成功 (方法: event.reply)")
+            logger.info(f"[ImageProducer] 消息发送成功 (方法: event.reply)")
             return True
         except Exception as e:
             last_error = e
-            logger.warning(f"[ImageGen] event.reply 失败: {e}")
+            logger.warning(f"[ImageProducer] event.reply 失败: {e}")
         
         # 方法3: 直接通过 message_obj 发送
         try:
             tried_methods.append("message_obj")
             if hasattr(event, 'message_obj') and hasattr(event.message_obj, 'reply'):
                 await event.message_obj.reply(message)
-                logger.info(f"[ImageGen] 消息发送成功 (方法: message_obj.reply)")
+                logger.info(f"[ImageProducer] 消息发送成功 (方法: message_obj.reply)")
                 return True
         except Exception as e:
             last_error = e
-            logger.warning(f"[ImageGen] message_obj.reply 失败: {e}")
+            logger.warning(f"[ImageProducer] message_obj.reply 失败: {e}")
         
         # 所有方法都失败了
-        logger.error(f"[ImageGen] 所有消息发送方法都失败了! 尝试过: {tried_methods}, 最后错误: {last_error}")
+        logger.error(f"[ImageProducer] 所有消息发送方法都失败了! 尝试过: {tried_methods}, 最后错误: {last_error}")
         return False
 
     @filter.command("img", alias={"aimg", "生图", "ai生图"})
@@ -339,11 +513,34 @@ class ImageProducer(Star):
             await self._safe_reply(event, "❌ 当前用户不在白名单中，无法使用图像生成功能")
             return
 
+        gather_mode = self.conf.get("gather_mode_enabled", False)
+
+        if gather_mode:
+            await self._generate_image_gather_mode(event)
+        else:
+            await self._generate_image_direct_mode(event)
+
+    async def _generate_image_direct_mode(self, event: AstrMessageEvent):
+        """直接模式：立即生成图片"""
         text = self._get_message_text(event)
         prompt = self._extract_prompt(text)
 
-        # 从事件中提取图片 URL 并下载
+        # 检查是否是预设触发词
+        # 格式：/img <触发词> <文本>
+        if prompt:
+            parts = prompt.split(maxsplit=1)
+            if parts:
+                trigger = parts[0].strip()
+                user_text = parts[1].strip() if len(parts) > 1 else ""
+                
+                # 检查是否是预设触发词
+                preset_prompt = self.get_preset_prompt(trigger, user_text)
+                if preset_prompt:
+                    logger.info(f"[ImageProducer] 检测到预设触发词: {trigger}")
+                    prompt = preset_prompt
+
         image_urls = self._extract_image_urls_from_event(event)
+        logger.info(f"[ImageProducer] 提取到的图片 URL: {image_urls}")
         image_b64_list = []
         if image_urls:
             logger.info(f"[ImageProducer] 检测到 {len(image_urls)} 张图片，开始下载...")
@@ -352,12 +549,106 @@ class ImageProducer(Star):
                 logger.info(f"[ImageProducer] 成功下载 {len(image_b64_list)} 张图片")
 
         if not prompt and not image_b64_list:
-            # 如果没有文字提示词但有图片，给出默认提示词
-            prompt = "根据这张图片生成类似的图像"
+            prompt = "Generate a similar image based on the reference image, maintaining the same style, composition, and mood"
+        elif prompt and image_b64_list:
+            prompt = f"{prompt}, reference image style, maintain the artistic approach and composition from the reference"
+        elif not prompt:
+            await self._safe_reply(event, "💡 请提供图像生成提示词\n示例: /img 一只可爱的猫咪在草地上玩耍\n使用预设: /img 手办化 一只猫")
+            return
+
+        await self._generate_and_send(event, prompt, image_b64_list)
+
+    async def _generate_image_gather_mode(self, event: AstrMessageEvent):
+        """收集模式：收集多张图片和文本后生成"""
+        text = self._get_message_text(event)
+        prompt = self._extract_prompt(text)
+
+        image_urls = self._extract_image_urls_from_event(event)
+        image_b64_list = []
+        if image_urls:
+            logger.info(f"[ImageProducer] 收集模式：检测到 {len(image_urls)} 张图片...")
+            image_b64_list = await self._fetch_images(image_urls)
+
+        if prompt:
+            prompt = f"{prompt}, reference image style, maintain the artistic approach and composition from the reference"
+
+        operator_id = event.get_sender_id()
+        is_cancel = False
+
+        await self._safe_reply(event, f"""📝 <b>绘图收集模式已启用</b>
+提示词：{prompt or "（待输入）"}
+图片：{len(image_b64_list)} 张
+
+💡 <b>操作说明：</b>
+• 发送图片可追加参考图
+• 发送文字可追加到提示词
+• 发送「<b>开始</b>」立即生成
+• 发送「<b>取消</b>」退出操作
+• 60 秒内有效""")
+
+        @session_waiter(timeout=60, record_history_chains=False)
+        async def waiter(controller: SessionController, sub_event: AstrMessageEvent):
+            nonlocal is_cancel, prompt, image_b64_list
+
+            if sub_event.get_sender_id() != operator_id:
+                return
+
+            sub_text = self._get_message_text(sub_event).strip()
+
+            if sub_text == "取消":
+                is_cancel = True
+                await self._safe_reply(sub_event, "✅ 操作已取消")
+                controller.stop()
+                return
+
+            if sub_text == "开始":
+                if not prompt and not image_b64_list:
+                    await self._safe_reply(sub_event, "❌ 没有可用的提示词或参考图，请先发送内容")
+                    controller.keep(timeout=60, reset_timeout=True)
+                    return
+                controller.stop()
+                return
+
+            sub_image_urls = self._extract_image_urls_from_event(sub_event)
+            if sub_image_urls:
+                sub_b64_list = await self._fetch_images(sub_image_urls)
+                image_b64_list.extend(sub_b64_list)
+                logger.info(f"[ImageProducer] 收集模式：追加 {len(sub_b64_list)} 张图片")
+
+            sub_prompt = self._extract_prompt(sub_text)
+            if sub_prompt:
+                if prompt:
+                    prompt = f"{prompt} {sub_prompt}"
+                else:
+                    prompt = sub_prompt
+
+            if not prompt and not image_b64_list:
+                await self._safe_reply(sub_event, "❌ 还没有输入任何内容，请发送图片或文字")
+            else:
+                await self._safe_reply(sub_event, f"""📝 <b>已收集：</b>
+提示词：{prompt or "（待输入）"}
+图片：{len(image_b64_list)} 张
+
+💡 继续发送内容，或发送「<b>开始</b>」生成""")
+
+            controller.keep(timeout=60, reset_timeout=True)
+
+        try:
+            await waiter(event)
+        except Exception as e:
+            logger.error(f"[ImageProducer] 收集模式出错: {e}", exc_info=True)
+            await self._safe_reply(event, "❌ 处理时发生错误")
+            return
+        finally:
+            if is_cancel:
+                return
+
+        if not prompt and not image_b64_list:
+            await self._safe_reply(event, "❌ 收集超时，已取消操作")
+            return
 
         if not prompt:
-            await self._safe_reply(event, "💡 请提供图像生成提示词\n示例: /img 一只可爱的猫咪在草地上玩耍")
-            return
+            prompt = "Generate a similar image based on the reference image"
 
         await self._generate_and_send(event, prompt, image_b64_list)
 
@@ -562,18 +853,39 @@ class ImageProducer(Star):
         except Exception as e:
             logger.error(f"[ImageProducer] 发送开始消息失败，但继续尝试: {e}", exc_info=True)
         
+        # 加载预设参考图片并合并
+        refer_images_b64 = await self._load_refer_images()
+        if image_b64_list is None:
+            image_b64_list = refer_images_b64
+        elif refer_images_b64:
+            image_b64_list = refer_images_b64 + image_b64_list
+            logger.info(f"[ImageProducer] 合并预设参考图片后共 {len(image_b64_list)} 张")
+        
         # === 阶段 2: 生成图片 ===
         result = None
         save_path = None
         image_b64_data = None
         final_message = "✅ 图像生成完成！"
+
+        # 智能选择平台：有图片时自动使用视觉模型
+        target_platform = self.default_platform
+        has_images = bool(image_b64_list and len(image_b64_list) > 0)
+        
+        if has_images and self.auto_switch_mode:
+            api_type = self.conf.get("provider_type", "")
+            vision_provider_name = PLATFORM_TO_VISION_PROVIDER.get(api_type)
+            if vision_provider_name and vision_provider_name in self.provider_map:
+                target_platform = vision_provider_name
+                logger.info(f"[ImageProducer] 检测到图片，自动切换到视觉模型: {target_platform}")
+            else:
+                logger.info(f"[ImageProducer] 检测到图片，但未配置视觉模型，继续使用默认平台: {target_platform}")
         
         try:
             try:
                 async with self.semaphore:
                     result = await asyncio.wait_for(
                         self.generate_image_internal(
-                            platform=self.default_platform,
+                            platform=target_platform,
                             prompt=prompt,
                             size=self.default_size,
                             quality=self.default_quality,
@@ -688,148 +1000,124 @@ class ImageProducer(Star):
         if not provider:
             return ImageResult(success=False, error=f"未找到平台: {platform}")
 
-        try:
-            result = await provider.generate_image(
-                prompt=prompt,
-                size=size,
-                quality=quality,
-                style=style,
-                model=model,
-                image_b64_list=image_b64_list,
-            )
-            return result
-        except Exception as e:
-            logger.error(f"[ImageProducer] 生成图像异常: {e}", exc_info=True)
-            return ImageResult(success=False, error=str(e))
+        last_error = None
+
+        # 获取所有备用Provider（provider_map中除了主provider外的都是备用）
+        fallback_providers = []
+        for pname, p in self.provider_map.items():
+            if pname != platform:
+                fallback_providers.append((pname, p))
+
+        # 构建完整的Provider列表（主Provider在前，备用Provider在后）
+        all_providers = [(platform, provider)] + fallback_providers
+
+        for provider_name, current_provider in all_providers:
+            for attempt in range(self.max_retry):
+                try:
+                    result = await current_provider.generate_image(
+                        prompt=prompt,
+                        size=size,
+                        quality=quality,
+                        style=style,
+                        model=model,
+                        image_b64_list=image_b64_list,
+                    )
+                    if result.success:
+                        if provider_name != platform:
+                            logger.info(f"[ImageProducer] 主Provider失败，备用Provider {provider_name} 成功生成图像")
+                        return result
+                    last_error = result.error
+                    logger.warning(f"[ImageProducer] Provider {provider_name} 生成失败: {last_error}")
+                except Exception as e:
+                    last_error = str(e)
+                    logger.error(f"[ImageProducer] Provider {provider_name} 生成异常: {e}", exc_info=True)
+
+        return ImageResult(success=False, error=last_error or "所有Provider生成图像失败")
 
     async def _save_image(self, image_data: bytes, prompt: str) -> Optional[str]:
         if not self.save_images:
             return None
-
+        
         try:
             import re
-            safe_prompt = re.sub(r'[\\/*?:"<>|]', '_', prompt[:30])
+            clean_prompt = re.sub(r'[\\/*?:"<>|]', '', prompt[:50])
             timestamp = asyncio.get_event_loop().time()
-            filename = f"{self.default_platform}_{safe_prompt}_{int(timestamp)}.png"
+            filename = f"{clean_prompt}_{int(timestamp)}.jpg"
             save_path = self.save_dir / filename
-
             with open(save_path, 'wb') as f:
                 f.write(image_data)
-
             return str(save_path)
         except Exception as e:
-            logger.error(f"[ImageProducer] 保存图像失败: {e}", exc_info=True)
+            logger.error(f"[ImageProducer] 保存图片失败: {e}", exc_info=True)
             return None
 
     async def _save_image_to_ai_images(self, image_data: bytes, prompt: str) -> Optional[str]:
+        """保存图片到 ai_images 目录"""
         try:
             import re
-            from datetime import datetime
-            safe_prompt = re.sub(r'[\\/*?:"<>|]', '_', prompt[:30])
-            now = datetime.now()
-            timestamp = now.strftime("%Y%m%d%H%M%S")
-            filename = f"img_{timestamp}_{safe_prompt}.png"
+            clean_prompt = re.sub(r'[\\/*?:"<>|]', '', prompt[:50])
+            timestamp = asyncio.get_event_loop().time()
+            filename = f"{clean_prompt}_{int(timestamp)}.jpg"
             save_path = self.ai_images_dir / filename
-
             with open(save_path, 'wb') as f:
                 f.write(image_data)
-
-            logger.info(f"[ImageProducer] 图像已保存到: {save_path}")
             return str(save_path)
         except Exception as e:
-            logger.error(f"[ImageProducer] 保存图像到ai_images失败: {e}", exc_info=True)
+            logger.error(f"[ImageProducer] 保存图片到 ai_images 失败: {e}", exc_info=True)
             return None
-
-    async def _download_and_save(self, url: str, prompt: str) -> Optional[str]:
-        if not self.save_images:
-            return None
-
-        try:
-            async with self.session.get(url) as response:
-                if response.status == 200:
-                    image_data = await response.read()
-                    return await self._save_image(image_data, prompt)
-        except Exception as e:
-            logger.error(f"[ImageProducer] 下载图像失败: {e}", exc_info=True)
-        return None
 
     async def _download_and_save_to_ai_images(self, url: str, prompt: str) -> Optional[str]:
+        """下载图片并保存到 ai_images 目录"""
         try:
+            if not self.session:
+                return None
             async with self.session.get(url) as response:
                 if response.status == 200:
                     image_data = await response.read()
                     return await self._save_image_to_ai_images(image_data, prompt)
+                else:
+                    logger.warning(f"[ImageProducer] 下载图片失败，状态码: {response.status}")
+                    return None
         except Exception as e:
-            logger.error(f"[ImageProducer] 下载并保存图像到ai_images失败: {e}", exc_info=True)
-        return None
+            logger.error(f"[ImageProducer] 下载并保存图片失败: {e}", exc_info=True)
+            return None
 
-    @filter.command("img帮助", alias={"aimg帮助", "生图帮助", "ai生图帮助"})
-    async def help_command(self, event: AstrMessageEvent):
-        help_text = """
-📷 图像生成插件帮助
+    @filter.command("img列表", alias={"图片列表", "预设列表"})
+    async def list_presets_command(self, event: AstrMessageEvent):
+        if not self.is_group_allowed(event):
+            await self._safe_reply(event, "❌ 当前群组不在白名单中，无法使用此功能")
+            return
 
-基础命令:
-- /img <提示词> - 生成图像
-- /img帮助 - 显示此帮助信息
+        if not self.is_user_allowed(event):
+            await self._safe_reply(event, "❌ 当前用户不在白名单中，无法使用此功能")
+            return
 
-🎨 高级命令:
-- /提示词 <描述> - AI生成专业提示词
-- /生成 <描述> - AI生成提示词并创作图像
+        if not self.preset_prompt_dict:
+            await self._safe_reply(event, "📋 暂无预设提示词")
+            return
 
-支持的平台:
-- OpenAI DALL-E
-- Google Gemini Imagen
-- xAI Grok
-- 字节跳动 Seed
-- 智谱 AI
-- 阿里云 千问
-- 百度 文心一言
-- 腾讯 混元
-- Stable Diffusion
+        presets_list = "\n".join([f"• {trigger}" for trigger in self.preset_prompt_dict.keys()])
+        await self._safe_reply(event, f"📋 可用预设触发词:\n{presets_list}\n\n💡 使用方法: /img <触发词> <描述>")
 
-示例:
-- /img 一只可爱的猫咪在草地上玩耍
-- /提示词 未来城市夜景
-- /生成 赛博朋克风格的城市
-"""
-        await self._safe_reply(event, help_text.strip())
+    @filter.command("img查看", alias={"图片查看", "预设查看"})
+    async def view_preset_command(self, event: AstrMessageEvent):
+        if not self.is_group_allowed(event):
+            await self._safe_reply(event, "❌ 当前群组不在白名单中，无法使用此功能")
+            return
 
-    @filter.command("img平台", alias={"aimg平台", "生图平台", "ai生图平台"})
-    async def platform_command(self, event: AstrMessageEvent):
-        platforms_info = "📷 支持的AI图像生成平台:\n\n"
-        for name in PROVIDER_LIST:
-            config = self.provider_configs.get(name)
-            if config:
-                platforms_info += f"✅ {name.upper()}: 已配置\n"
-            else:
-                platforms_info += f"❌ {name.upper()}: 未配置\n"
-        platforms_info += f"\n默认平台: {self.default_platform}"
-        await self._safe_reply(event, platforms_info)
+        if not self.is_user_allowed(event):
+            await self._safe_reply(event, "❌ 当前用户不在白名单中，无法使用此功能")
+            return
 
-    @filter.command("img设置", alias={"aimg设置", "生图设置", "ai生图设置"})
-    async def settings_command(self, event: AstrMessageEvent):
-        settings_text = f"""⚙️ 图像生成插件当前设置:
+        text = self._get_message_text(event)
+        text = text.replace('/img查看', '').replace('/图片查看', '').replace('/预设查看', '').strip()
 
-📌 默认配置:
-- 平台: {self.default_platform}
-- 尺寸: {self.default_size}
-- 质量: {self.default_quality}
-- 风格: {self.default_style}
+        if not text:
+            await self._safe_reply(event, "💡 请指定要查看的预设触发词\n示例: /img查看 手办化")
+            return
 
-📌 功能设置:
-- 最大并发: {self.max_concurrent_jobs}
-- NSFW过滤: {'开启' if self.enable_nsfw_filter else '关闭'}
-- 自动保存: {'开启' if self.auto_save_images else '关闭'}
-- LLM工具: {'开启' if self.conf.get('llm_tool_enabled', False) else '关闭'}
-
-📌 白名单:
-- 群组白名单: {'开启' if self.group_whitelist_enabled else '关闭'}
-- 用户白名单: {'开启' if self.user_whitelist_enabled else '关闭'}
-
-💡 使用 /img帮助 查看更多命令"""
-        await self._safe_reply(event, settings_text)
-
-    async def shutdown(self):
-        if self.session:
-            await self.session.close()
-            logger.info("[ImageGen] 已关闭 HTTP 会话")
+        preset_prompt = self.preset_prompt_dict.get(text)
+        if preset_prompt:
+            await self._safe_reply(event, f"📝 预设「{text}」的内容:\n{preset_prompt}")
+        else:
+            await self._safe_reply(event, f"❌ 未找到预设触发词: {text}")

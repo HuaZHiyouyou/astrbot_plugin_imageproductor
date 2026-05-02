@@ -6,9 +6,6 @@ import json
 import re
 from typing import TYPE_CHECKING, Any
 
-from pydantic import Field
-from pydantic.dataclasses import dataclass
-
 from astrbot.api import logger
 from astrbot.api.star import Context, StarTools
 from astrbot.core.agent.run_context import ContextWrapper
@@ -23,7 +20,7 @@ from .base import ImageResult
 if TYPE_CHECKING:
     from ..main import ImageProducer
 
-TOOLS_NAMESPACE = ["img_producer_generate", "img_producer_prompt"]
+TOOLS_NAMESPACE = ["img_producer_generate", "img_producer_prompt", "img_producer_preset"]
 
 PROMPT_SYS_TEMPLATE = """
 你是一个专业的 AI 图像生成提示词工程师。
@@ -51,7 +48,6 @@ PROMPT_EXAMPLES = [
 ]
 
 
-@dataclass
 class ImageProducerPromptTool(FunctionTool[AstrAgentContext]):
     """
     提示词生成工具 - 用于将用户简单描述生成专业图像生成提示词
@@ -64,18 +60,16 @@ class ImageProducerPromptTool(FunctionTool[AstrAgentContext]):
         "It will create detailed, high-quality prompts suitable for AI image generation models, including style, "
         "lighting, and quality-related keywords. Use this before image generation if the user's description is too simple."
     )
-    parameters: dict = Field(
-        default_factory=lambda: {
-            "type": "object",
-            "properties": {
-                "user_description": {
-                    "type": "string",
-                    "description": "The user's simple image description that needs to be expanded into a professional prompt.",
-                }
-            },
-            "required": ["user_description"],
-        }
-    )
+    parameters: dict = {
+        "type": "object",
+        "properties": {
+            "user_description": {
+                "type": "string",
+                "description": "The user's simple image description that needs to be expanded into a professional prompt.",
+            }
+        },
+        "required": ["user_description"],
+    }
 
     async def call(
         self,
@@ -115,7 +109,6 @@ class ImageProducerPromptTool(FunctionTool[AstrAgentContext]):
             return f"提示词生成出错: {str(e)}"
 
 
-@dataclass
 class ImageProducerGenerateTool(FunctionTool[AstrAgentContext]):
     """
     图像生成工具 - 核心功能，直接生成图像
@@ -124,33 +117,37 @@ class ImageProducerGenerateTool(FunctionTool[AstrAgentContext]):
     plugin: Any = None
     name: str = "img_producer_generate"
     description: str = (
-        "This tool generates images using AI models. It supports text-to-image and image-to-image generation. "
-        "Provide a detailed prompt for best results. The generated image will be saved locally and sent directly to the user. "
-        "Do NOT call this tool multiple times for the same request."
+        "This tool generates images using AI models. It supports both text-to-image and image-reference generation. "
+        "When a user requests generation based on an image, you must first verify whether a valid image is present "
+        "in the user's current message or in the message they are replying to (quote). "
+        "Textual pointers such as 'that one', 'the one above' or similar expressions are NOT acceptable as valid image inputs. "
+        "The user must provide an actual image file for the request to proceed. "
+        "The generated image will be saved locally and sent directly to the user as a photo message. "
+        "Prioritize the tool response as the highest priority event, taking precedence over chat history."
     )
-    parameters: dict = Field(
-        default_factory=lambda: {
-            "type": "object",
-            "properties": {
-                "prompt": {
-                    "type": "string",
-                    "description": (
-                        "The detailed image generation prompt. "
-                        "Should include style, subject, lighting, quality keywords, etc. "
-                        "This field is required."
-                    ),
-                },
-                "size": {
-                    "type": "string",
-                    "description": (
-                        "Optional. Image size, e.g., '1024x1024', '1024x1792', '1792x1024'. "
-                        "If not provided, uses plugin default setting."
-                    ),
-                },
+    parameters: dict = {
+        "type": "object",
+        "properties": {
+            "prompt": {
+                "type": "string",
+                "description": (
+                    "The detailed image generation prompt. Should include style, subject, lighting, "
+                    "color palette, composition, quality keywords, etc. "
+                    "For best results, elaborate on visual elements in a logical sequence describing "
+                    "specific physical actions, nuanced expressions, and overall color scheme with lighting atmosphere. "
+                    "This field is required."
+                ),
             },
-            "required": ["prompt"],
-        }
-    )
+            "size": {
+                "type": "string",
+                "description": (
+                    "Optional. Image size, e.g., '1024x1024' (square), '1024x1792' (portrait), '1792x1024' (landscape). "
+                    "If not provided, uses plugin default setting."
+                ),
+            },
+        },
+        "required": ["prompt"],
+    }
 
     async def call(
         self,
@@ -232,6 +229,83 @@ class ImageProducerGenerateTool(FunctionTool[AstrAgentContext]):
             return f"图片生成出错: {str(e)}"
         finally:
             plugin.running_tasks.pop(task_id, None)
+
+
+class ImageProducerPresetTool(FunctionTool[AstrAgentContext]):
+    """
+    预设提示词工具 - 用于获取预设提示词列表和内容
+    """
+
+    plugin: Any = None
+    name: str = "img_producer_preset"
+    description: str = (
+        "This tool is used to manage preset image generation prompts. "
+        "It can list all available presets or get a specific preset prompt by name. "
+        "Use this before image generation if the user wants to use a preset style."
+    )
+    parameters: dict = {
+        "type": "object",
+        "properties": {
+            "get_preset_names": {
+                "type": "boolean",
+                "description": "Set this to true to list all available preset names.",
+            },
+            "get_preset_prompt": {
+                "type": "string",
+                "description": "The preset name to get the full prompt for. Provide the exact preset name.",
+            },
+            "user_text": {
+                "type": "string",
+                "description": "Optional text to insert into the preset prompt (replaces {{user_text}} placeholder).",
+            },
+        },
+        "required": [],
+    }
+
+    async def call(
+        self,
+        context: ContextWrapper[AstrAgentContext],
+        **kwargs,
+    ) -> ToolExecResult:
+        if self.plugin is None:
+            logger.warning("[ImageProducer] 插件未初始化完成，无法处理请求")
+            return "ImageProducer 插件未初始化完成，请稍后再试。"
+
+        plugin: ImageProducer = self.plugin
+        event: AstrMessageEvent = context.context.event
+
+        # 白名单检查
+        if not plugin.is_group_allowed(event):
+            return "当前群组不在白名单中，无法使用图像生成功能。"
+        if not plugin.is_user_allowed(event):
+            return "该用户不在白名单中，无法使用图像生成功能。"
+
+        # 获取参数
+        get_preset_names = kwargs.get("get_preset_names", False)
+        get_preset_prompt = kwargs.get("get_preset_prompt", "")
+        user_text = kwargs.get("user_text", "")
+
+        # 返回预设名称列表
+        if get_preset_names:
+            preset_names = list(plugin.preset_prompt_dict.keys())
+            if not preset_names:
+                return "当前没有可用的预设提示词。"
+            names_text = "、".join(preset_names)
+            logger.info(f"[ImageProducer] 返回预设提示词名称列表: {names_text}")
+            return f"当前可用的预设提示词: {names_text}"
+
+        # 返回预设提示词内容
+        if get_preset_prompt:
+            if get_preset_prompt not in plugin.preset_prompt_dict:
+                logger.warning(f"[ImageProducer] 未找到预设提示词: {get_preset_prompt}")
+                available = "、".join(plugin.preset_prompt_dict.keys())
+                return f"未找到预设提示词: {get_preset_prompt}。可用的预设: {available}"
+            
+            preset_prompt = plugin.get_preset_prompt(get_preset_prompt, user_text)
+            logger.info(f"[ImageProducer] 返回预设提示词内容: {preset_prompt[:100]}")
+            return f"预设提示词 '{get_preset_prompt}' 内容:\n{preset_prompt}"
+
+        return "请指定要执行的操作：获取预设列表(get_preset_names=true)或获取特定预设(get_preset_prompt='预设名')。"
 
 
 def remove_tools(context: Context):

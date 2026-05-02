@@ -1,356 +1,496 @@
 {
-  "default_platform": {
-    "description": "默认AI图像生成平台\n用于指定生成图像时优先使用的AI平台，支持多个平台切换。",
-    "type": "string",
-    "default": "openai",
-    "options": ["openai", "gemini", "grok", "seed", "zhipu", "qianwen", "baidu", "hunyuan", "stable_diffusion"]
-  },
-  "default_size": {
-    "description": "默认图像尺寸\n图像的分辨率大小，不同平台支持的尺寸有所不同。",
-    "type": "string",
-    "default": "1024x1024",
-    "options": ["512x512", "1024x1024", "1792x1024", "1024x1792", "2048x2048"]
-  },
-  "default_quality": {
-    "description": "默认图像质量\n图像生成的质量等级，高质量会消耗更多token。",
-    "type": "string",
-    "default": "standard",
-    "options": ["standard", "hd", "ultra", "premium"]
-  },
-  "default_style": {
-    "description": "默认图像风格\n图像的艺术风格，不同风格会产生不同视觉效果。",
-    "type": "string",
-    "default": "vivid",
-    "options": ["vivid", "natural", "realistic", "anime", "illustration", "photographic", "digital_art", "painting", "3d_render", "concept_art"]
-  },
-  "max_concurrent_jobs": {
-    "description": "最大并发任务数\n同时进行图像生成的最大数量，避免API限流。",
-    "type": "int",
-    "default": 5
-  },
-  "enable_nsfw_filter": {
-    "description": "启用NSFW过滤\n过滤可能包含成人内容的生成请求，建议开启。",
-    "type": "bool",
-    "default": true
-  },
-  "auto_save_images": {
-    "description": "自动保存图像\n生成成功后自动保存到本地目录。",
-    "type": "bool",
-    "default": true
-  },
-  "save_images": {
-    "description": "保存图像到本地\n允许将生成的图像保存到本地存储。",
-    "type": "bool",
-    "default": true
-  },
-  "llm_tool_enabled": {
-    "description": "启用LLM工具调用\n允许AI助手在对话中自动调用图像生成功能。",
-    "type": "bool",
-    "default": false
-  },
-  "prefix_enabled": {
-    "description": "启用前缀匹配\n通过特定前缀触发图像生成命令。",
-    "type": "bool",
-    "default": false
-  },
-  "prefix_list": {
-    "description": "前缀列表\n自定义触发前缀，多个前缀用逗号分隔。",
-    "type": "string",
-    "default": "/img,/aimg"
-  },
-  "prefix_coexist": {
-    "description": "混合模式\n不@机器人也能触发命令，方便群聊使用。",
-    "type": "bool",
-    "default": false
-  },
-  "whitelist_enabled": {
-    "description": "启用群组白名单\n只允许白名单内的群组使用图像生成功能。",
-    "type": "bool",
-    "default": false
-  },
-  "group_whitelist": {
-    "description": "群组白名单\n允许使用插件的群组ID，多个用逗号分隔。",
-    "type": "string",
-    "default": ""
-  },
-  "user_whitelist_enabled": {
-    "description": "启用用户白名单\n只允许白名单内的用户使用图像生成功能。",
-    "type": "bool",
-    "default": false
-  },
-  "user_whitelist": {
-    "description": "用户白名单\n允许使用插件的用户ID，多个用逗号分隔。",
-    "type": "string",
-    "default": ""
-  },
-  "openai_enabled": {
-    "description": "启用 OpenAI DALL-E\nOpenAI的图像生成服务，质量高但费用较高。",
-    "type": "bool",
-    "default": false
-  },
-  "openai_model": {
-    "description": "OpenAI 模型\nDALL-E 模型名称，推荐使用 dall-e-3。",
-    "type": "string",
-    "default": "dall-e-3"
-  },
-  "openai_main_api_key": {
-    "description": "OpenAI 主 API Key\n从OpenAI官网获取的API密钥。",
-    "type": "string",
-    "default": ""
-  },
-  "openai_main_api_url": {
-    "description": "OpenAI 主 API URL\n官方地址: https://api.openai.com/v1\n支持自定义地址用于代理或兼容服务。",
-    "type": "string",
-    "default": "https://api.openai.com/v1"
-  },
-  "openai_backup_api_key": {
-    "description": "OpenAI 备用 API Key\n当主密钥失效时自动切换使用。",
-    "type": "string",
-    "default": ""
-  },
-  "openai_backup_api_url": {
-    "description": "OpenAI 备用 API URL\n备用服务地址，用于故障转移。",
-    "type": "string",
-    "default": ""
-  },
-  "gemini_enabled": {
-    "description": "启用 Google Gemini Imagen\nGoogle的图像生成服务，支持多语言提示词。",
-    "type": "bool",
-    "default": false
-  },
-  "gemini_model": {
-    "description": "Gemini 模型\nImagen 模型版本，推荐使用 imagen-3.0-generate-002。",
-    "type": "string",
-    "default": "imagen-3.0-generate-002"
-  },
-  "gemini_main_api_key": {
-    "description": "Gemini 主 API Key\n从Google Cloud获取的API密钥。",
-    "type": "string",
-    "default": ""
-  },
-  "gemini_main_api_url": {
-    "description": "Gemini 主 API URL\n官方地址: https://generativelanguage.googleapis.com/v1beta",
-    "type": "string",
-    "default": "https://generativelanguage.googleapis.com/v1beta"
-  },
-  "gemini_backup_api_key": {
-    "description": "Gemini 备用 API Key\n当主密钥失效时自动切换使用。",
-    "type": "string",
-    "default": ""
-  },
-  "gemini_backup_api_url": {
-    "description": "Gemini 备用 API URL\n备用服务地址，用于故障转移。",
-    "type": "string",
-    "default": ""
-  },
-  "grok_enabled": {
-    "description": "启用 xAI Grok\nxAI的图像生成服务，支持创意风格生成。",
-    "type": "bool",
-    "default": false
-  },
-  "grok_model": {
-    "description": "Grok 模型\nGrok-Imagine 模型版本。",
-    "type": "string",
-    "default": "grok-imagine-1.0"
-  },
-  "grok_main_api_key": {
-    "description": "Grok 主 API Key\n从xAI官网获取的API密钥。",
-    "type": "string",
-    "default": ""
-  },
-  "grok_main_api_url": {
-    "description": "Grok 主 API URL\n官方地址: https://api.x.ai/v1",
-    "type": "string",
-    "default": "https://api.x.ai/v1"
-  },
-  "grok_backup_api_key": {
-    "description": "Grok 备用 API Key\n当主密钥失效时自动切换使用。",
-    "type": "string",
-    "default": ""
-  },
-  "grok_backup_api_url": {
-    "description": "Grok 备用 API URL\n备用服务地址，用于故障转移。",
-    "type": "string",
-    "default": ""
-  },
-  "seed_enabled": {
-    "description": "启用 Seed/Seedream\n字节跳动的图像生成服务，性价比高。",
-    "type": "bool",
-    "default": false
-  },
-  "seed_model": {
-    "description": "Seed 模型\nSeedream 模型版本。",
-    "type": "string",
-    "default": "doubao-seedream-4-5-251128"
-  },
-  "seed_main_api_key": {
-    "description": "Seed 主 API Key\n从豆包开放平台获取的API密钥。",
-    "type": "string",
-    "default": ""
-  },
-  "seed_main_api_url": {
-    "description": "Seed 主 API URL\n官方地址: https://api.seede.ai",
-    "type": "string",
-    "default": "https://api.seede.ai"
-  },
-  "seed_backup_api_key": {
-    "description": "Seed 备用 API Key\n当主密钥失效时自动切换使用。",
-    "type": "string",
-    "default": ""
-  },
-  "seed_backup_api_url": {
-    "description": "Seed 备用 API URL\n备用服务地址，用于故障转移。",
-    "type": "string",
-    "default": ""
-  },
-  "zhipu_enabled": {
-    "description": "启用 智谱 AI\n智谱的图像生成服务，支持中文提示词，响应速度快。",
-    "type": "bool",
-    "default": false
-  },
-  "zhipu_model": {
-    "description": "智谱 模型\n支持 models/text-image-generation 等模型。",
-    "type": "string",
-    "default": "models/text-image-generation"
-  },
-  "zhipu_main_api_key": {
-    "description": "智谱 主 API Key\n从智谱开放平台获取的API密钥。",
-    "type": "string",
-    "default": ""
-  },
-  "zhipu_main_api_url": {
-    "description": "智谱 主 API URL\n官方地址: https://open.bigmodel.cn/api/paas/v4",
-    "type": "string",
-    "default": "https://open.bigmodel.cn/api/paas/v4"
-  },
-  "zhipu_backup_api_key": {
-    "description": "智谱 备用 API Key\n当主密钥失效时自动切换使用。",
-    "type": "string",
-    "default": ""
-  },
-  "zhipu_backup_api_url": {
-    "description": "智谱 备用 API URL\n备用服务地址，用于故障转移。",
-    "type": "string",
-    "default": ""
-  },
-  "qianwen_enabled": {
-    "description": "启用 阿里云 千问\n阿里云的图像生成服务，支持多种风格。",
-    "type": "bool",
-    "default": false
-  },
-  "qianwen_model": {
-    "description": "千问 模型\n支持 qwen-vl-plus 等模型。",
-    "type": "string",
-    "default": "qwen-vl-plus"
-  },
-  "qianwen_main_api_key": {
-    "description": "千问 主 API Key\n从阿里云获取的API密钥。",
-    "type": "string",
-    "default": ""
-  },
-  "qianwen_main_api_url": {
-    "description": "千问 主 API URL\n官方地址: https://dashscope.aliyuncs.com/api/text2image",
-    "type": "string",
-    "default": "https://dashscope.aliyuncs.com/api/text2image"
-  },
-  "qianwen_backup_api_key": {
-    "description": "千问 备用 API Key\n当主密钥失效时自动切换使用。",
-    "type": "string",
-    "default": ""
-  },
-  "qianwen_backup_api_url": {
-    "description": "千问 备用 API URL\n备用服务地址，用于故障转移。",
-    "type": "string",
-    "default": ""
-  },
-  "baidu_enabled": {
-    "description": "启用 百度 文心一言\n百度的图像生成服务，中文理解能力强。",
-    "type": "bool",
-    "default": false
-  },
-  "baidu_model": {
-    "description": "文心一言 模型\n支持 ernie-vilg-v2 等模型。",
-    "type": "string",
-    "default": "ernie-vilg-v2"
-  },
-  "baidu_main_api_key": {
-    "description": "百度 主 API Key\n从百度AI开放平台获取的API密钥。",
-    "type": "string",
-    "default": ""
-  },
-  "baidu_main_api_url": {
-    "description": "百度 主 API URL\n官方地址: https://aip.baidubce.com/rpc/2.0/ai_custom/v1/images/text2image",
-    "type": "string",
-    "default": "https://aip.baidubce.com/rpc/2.0/ai_custom/v1/images/text2image"
-  },
-  "baidu_backup_api_key": {
-    "description": "百度 备用 API Key\n当主密钥失效时自动切换使用。",
-    "type": "string",
-    "default": ""
-  },
-  "baidu_backup_api_url": {
-    "description": "百度 备用 API URL\n备用服务地址，用于故障转移。",
-    "type": "string",
-    "default": ""
-  },
-  "hunyuan_enabled": {
-    "description": "启用 腾讯 混元\n腾讯的图像生成服务，支持多种风格和尺寸。",
-    "type": "bool",
-    "default": false
-  },
-  "hunyuan_model": {
-    "description": "混元 模型\n支持 hunyuan-image 等模型。",
-    "type": "string",
-    "default": "hunyuan-image"
-  },
-  "hunyuan_main_api_key": {
-    "description": "腾讯 主 API Key\n从腾讯云获取的API密钥。",
-    "type": "string",
-    "default": ""
-  },
-  "hunyuan_main_api_url": {
-    "description": "腾讯 主 API URL\n官方地址: https://hunyuan.tencentcloudapi.com/",
-    "type": "string",
-    "default": "https://hunyuan.tencentcloudapi.com/"
-  },
-  "hunyuan_backup_api_key": {
-    "description": "腾讯 备用 API Key\n当主密钥失效时自动切换使用。",
-    "type": "string",
-    "default": ""
-  },
-  "hunyuan_backup_api_url": {
-    "description": "腾讯 备用 API URL\n备用服务地址，用于故障转移。",
-    "type": "string",
-    "default": ""
-  },
-  "stable_diffusion_enabled": {
-    "description": "启用 Stable Diffusion\n本地部署的开源图像生成模型，无需付费。",
-    "type": "bool",
-    "default": false
-  },
-  "stable_diffusion_model": {
-    "description": "Stable Diffusion 模型\n本地部署的模型名称或路径。",
-    "type": "string",
-    "default": "stable-diffusion-xl-base-1.0"
-  },
-  "stable_diffusion_main_api_key": {
-    "description": "SD 主 API Key\n本地部署时通常为空，远程服务需要API密钥。",
-    "type": "string",
-    "default": ""
-  },
-  "stable_diffusion_main_api_url": {
-    "description": "SD 主 API URL\n本地部署默认: http://127.0.0.1:7860\n远程服务填写对应地址。",
-    "type": "string",
-    "default": "http://127.0.0.1:7860"
-  },
-  "stable_diffusion_backup_api_key": {
-    "description": "SD 备用 API Key\n当主密钥失效时自动切换使用。",
-    "type": "string",
-    "default": ""
-  },
-  "stable_diffusion_backup_api_url": {
-    "description": "SD 备用 API URL\n备用服务地址，用于故障转移。",
-    "type": "string",
-    "default": ""
-  }
+    "main_provider": {
+        "description": "主提供商",
+        "type": "object",
+        "hint": "优先使用主提供商，主提供商重试机会耗尽后，依次降级回退到备用提供商重试。",
+        "items": {
+            "enabled": {
+                "description": "启用接口",
+                "type": "bool",
+                "default": true
+            },
+            "api_name": {
+                "description": "提供商名称",
+                "type": "string",
+                "default": "主提供商"
+            },
+            "api_type": {
+                "description": "接口规范类型",
+                "type": "string",
+                "options": ["OpenAI", "Gemini", "Grok", "Zhipu", "Qianwen", "Baidu", "Hunyuan", "Seed", "Stable_Diffusion"],
+                "default": "OpenAI"
+            },
+            "api_key": {
+                "description": "API密钥",
+                "type": "string",
+                "default": ""
+            },
+            "api_url": {
+                "description": "API地址",
+                "type": "string",
+                "default": ""
+            },
+            "model": {
+                "description": "图像生成模型",
+                "type": "string",
+                "default": ""
+            },
+            "vision_api_key": {
+                "description": "视觉模型API密钥",
+                "type": "string",
+                "default": ""
+            },
+            "vision_api_url": {
+                "description": "视觉模型API地址",
+                "type": "string",
+                "default": ""
+            },
+            "vision_model": {
+                "description": "视觉理解模型",
+                "type": "string",
+                "default": ""
+            },
+            "auto_switch": {
+                "description": "自动切换模式",
+                "type": "bool",
+                "default": true,
+                "hint": "带图自动切换到视觉模型"
+            }
+        }
+    },
+    "back_provider": {
+        "description": "备用提供商1",
+        "type": "object",
+        "items": {
+            "enabled": {
+                "description": "启用接口",
+                "type": "bool",
+                "default": false
+            },
+            "api_name": {
+                "description": "提供商名称",
+                "type": "string",
+                "default": "备用提供商1"
+            },
+            "api_type": {
+                "description": "接口规范类型",
+                "type": "string",
+                "options": ["OpenAI", "Gemini", "Grok", "Zhipu", "Qianwen", "Baidu", "Hunyuan", "Seed", "Stable_Diffusion"],
+                "default": "Gemini"
+            },
+            "api_key": {
+                "description": "API密钥",
+                "type": "string",
+                "default": ""
+            },
+            "api_url": {
+                "description": "API地址",
+                "type": "string",
+                "default": ""
+            },
+            "model": {
+                "description": "图像生成模型",
+                "type": "string",
+                "default": ""
+            },
+            "vision_api_key": {
+                "description": "视觉模型API密钥",
+                "type": "string",
+                "default": ""
+            },
+            "vision_api_url": {
+                "description": "视觉模型API地址",
+                "type": "string",
+                "default": ""
+            },
+            "vision_model": {
+                "description": "视觉理解模型",
+                "type": "string",
+                "default": ""
+            },
+            "auto_switch": {
+                "description": "自动切换模式",
+                "type": "bool",
+                "default": true
+            }
+        }
+    },
+    "back_provider2": {
+        "description": "备用提供商2",
+        "type": "object",
+        "items": {
+            "enabled": {
+                "description": "启用接口",
+                "type": "bool",
+                "default": false
+            },
+            "api_name": {
+                "description": "提供商名称",
+                "type": "string",
+                "default": "备用提供商2"
+            },
+            "api_type": {
+                "description": "接口规范类型",
+                "type": "string",
+                "options": ["OpenAI", "Gemini", "Grok", "Zhipu", "Qianwen", "Baidu", "Hunyuan", "Seed", "Stable_Diffusion"],
+                "default": "Zhipu"
+            },
+            "api_key": {
+                "description": "API密钥",
+                "type": "string",
+                "default": ""
+            },
+            "api_url": {
+                "description": "API地址",
+                "type": "string",
+                "default": ""
+            },
+            "model": {
+                "description": "图像生成模型",
+                "type": "string",
+                "default": ""
+            },
+            "vision_api_key": {
+                "description": "视觉模型API密钥",
+                "type": "string",
+                "default": ""
+            },
+            "vision_api_url": {
+                "description": "视觉模型API地址",
+                "type": "string",
+                "default": ""
+            },
+            "vision_model": {
+                "description": "视觉理解模型",
+                "type": "string",
+                "default": ""
+            },
+            "auto_switch": {
+                "description": "自动切换模式",
+                "type": "bool",
+                "default": true
+            }
+        }
+    },
+    "back_provider3": {
+        "description": "备用提供商3",
+        "type": "object",
+        "items": {
+            "enabled": {
+                "description": "启用接口",
+                "type": "bool",
+                "default": false
+            },
+            "api_name": {
+                "description": "提供商名称",
+                "type": "string",
+                "default": "备用提供商3"
+            },
+            "api_type": {
+                "description": "接口规范类型",
+                "type": "string",
+                "options": ["OpenAI", "Gemini", "Grok", "Zhipu", "Qianwen", "Baidu", "Hunyuan", "Seed", "Stable_Diffusion"],
+                "default": "Qianwen"
+            },
+            "api_key": {
+                "description": "API密钥",
+                "type": "string",
+                "default": ""
+            },
+            "api_url": {
+                "description": "API地址",
+                "type": "string",
+                "default": ""
+            },
+            "model": {
+                "description": "图像生成模型",
+                "type": "string",
+                "default": ""
+            },
+            "vision_api_key": {
+                "description": "视觉模型API密钥",
+                "type": "string",
+                "default": ""
+            },
+            "vision_api_url": {
+                "description": "视觉模型API地址",
+                "type": "string",
+                "default": ""
+            },
+            "vision_model": {
+                "description": "视觉理解模型",
+                "type": "string",
+                "default": ""
+            },
+            "auto_switch": {
+                "description": "自动切换模式",
+                "type": "bool",
+                "default": true
+            }
+        }
+    },
+    "back_provider4": {
+        "description": "备用提供商4",
+        "type": "object",
+        "items": {
+            "enabled": {
+                "description": "启用接口",
+                "type": "bool",
+                "default": false
+            },
+            "api_name": {
+                "description": "提供商名称",
+                "type": "string",
+                "default": "备用提供商4"
+            },
+            "api_type": {
+                "description": "接口规范类型",
+                "type": "string",
+                "options": ["OpenAI", "Gemini", "Grok", "Zhipu", "Qianwen", "Baidu", "Hunyuan", "Seed", "Stable_Diffusion"],
+                "default": "Baidu"
+            },
+            "api_key": {
+                "description": "API密钥",
+                "type": "string",
+                "default": ""
+            },
+            "api_url": {
+                "description": "API地址",
+                "type": "string",
+                "default": ""
+            },
+            "model": {
+                "description": "图像生成模型",
+                "type": "string",
+                "default": ""
+            },
+            "vision_api_key": {
+                "description": "视觉模型API密钥",
+                "type": "string",
+                "default": ""
+            },
+            "vision_api_url": {
+                "description": "视觉模型API地址",
+                "type": "string",
+                "default": ""
+            },
+            "vision_model": {
+                "description": "视觉理解模型",
+                "type": "string",
+                "default": ""
+            },
+            "auto_switch": {
+                "description": "自动切换模式",
+                "type": "bool",
+                "default": true
+            }
+        }
+    },
+    "back_provider5": {
+        "description": "备用提供商5",
+        "type": "object",
+        "items": {
+            "enabled": {
+                "description": "启用接口",
+                "type": "bool",
+                "default": false
+            },
+            "api_name": {
+                "description": "提供商名称",
+                "type": "string",
+                "default": "备用提供商5"
+            },
+            "api_type": {
+                "description": "接口规范类型",
+                "type": "string",
+                "options": ["OpenAI", "Gemini", "Grok", "Zhipu", "Qianwen", "Baidu", "Hunyuan", "Seed", "Stable_Diffusion"],
+                "default": "Hunyuan"
+            },
+            "api_key": {
+                "description": "API密钥",
+                "type": "string",
+                "default": ""
+            },
+            "api_url": {
+                "description": "API地址",
+                "type": "string",
+                "default": ""
+            },
+            "model": {
+                "description": "图像生成模型",
+                "type": "string",
+                "default": ""
+            },
+            "vision_api_key": {
+                "description": "视觉模型API密钥",
+                "type": "string",
+                "default": ""
+            },
+            "vision_api_url": {
+                "description": "视觉模型API地址",
+                "type": "string",
+                "default": ""
+            },
+            "vision_model": {
+                "description": "视觉理解模型",
+                "type": "string",
+                "default": ""
+            },
+            "auto_switch": {
+                "description": "自动切换模式",
+                "type": "bool",
+                "default": true
+            }
+        }
+    },
+    "preset_prompts": {
+        "description": "预设提示词",
+        "type": "list",
+        "default": [
+            "手办化 Create a premium, collectible 1/7 scale standalone figurine based on the image, meticulously replicating the character, made from smooth PVC and ABS plastic with a professional matte finish.",
+            "动漫风格 {{user_text}}, anime style, masterpiece, best quality, high resolution, vivid colors, detailed background, digital art",
+            "写实风格 {{user_text}}, photorealistic, hyperrealistic, 8k, best quality, realistic details, professional photography, natural lighting",
+            "像素风格 {{user_text}}, pixel art, retro video game style, 16-bit, vibrant colors, crisp pixels, nostalgic atmosphere",
+            "赛博朋克 {{user_text}}, cyberpunk style, neon lights, futuristic city, rain reflections, high contrast, cinematic lighting, 8k",
+            "水彩风格 {{user_text}}, watercolor painting style, soft brush strokes, delicate colors, translucent washes, artistic masterpiece",
+            "油画风格 {{user_text}}, oil painting style, rich textures, impasto brushwork, vibrant colors, classical art masterpiece",
+            "3D渲染 {{user_text}}, 3D render, octane render, realistic materials, soft shadows, studio lighting, high detail, 8k",
+            "科幻风格 {{user_text}}, sci-fi style, futuristic, advanced technology, space elements, blue and cyan tones, epic atmosphere",
+            "风景插画 {{user_text}}, landscape illustration, beautiful scenery, detailed nature, atmospheric lighting, digital painting",
+            "梦幻风格 {{user_text}}, dreamy style, soft focus, pastel colors, ethereal atmosphere, magical lighting, whimsical elements",
+            "暗黑风格 {{user_text}}, dark fantasy style, dramatic lighting, high contrast, moody atmosphere, intricate details, gothic elements",
+            "中国风 {{user_text}}, Chinese art style, traditional Chinese painting, ink wash style, elegant composition, cultural elements",
+            "日系插画 {{user_text}}, Japanese illustration style, vibrant colors, cute characters, detailed background, anime influence",
+            "极简风格 {{user_text}}, minimalist style, simple composition, clean lines, limited color palette, modern design",
+            "蒸汽朋克 {{user_text}}, steampunk style, brass gears, Victorian era, mechanical elements, warm lighting, intricate details",
+            "魔法风格 {{user_text}}, magical fantasy style, glowing particles, enchanted atmosphere, sparkles, ethereal light, mystical elements",
+            "复古风格 {{user_text}}, vintage style, old film aesthetic, retro colors, film grain, nostalgic atmosphere",
+            "恐怖风格 {{user_text}}, horror style, dark atmosphere, eerie lighting, unsettling composition, spooky elements",
+            "治愈风格 {{user_text}}, cozy style, warm tones, soft lighting, comfortable atmosphere, cute elements, gentle mood"
+        ],
+        "hint": "格式：触发词 提示词内容。触发词和提示词内容之间用空格分隔。"
+    },
+    "common_config": {
+        "description": "常规配置",
+        "type": "object",
+        "items": {
+            "default_size": {
+                "description": "默认图像尺寸",
+                "type": "string",
+                "default": "1024x1024",
+                "options": ["512x512", "1024x1024", "1792x1024", "1024x1792", "2048x2048"]
+            },
+            "default_quality": {
+                "description": "默认图像质量",
+                "type": "string",
+                "default": "standard",
+                "options": ["standard", "hd", "ultra", "premium"]
+            },
+            "default_style": {
+                "description": "默认图像风格",
+                "type": "string",
+                "default": "vivid",
+                "options": ["vivid", "natural", "realistic", "anime", "illustration"]
+            },
+            "max_concurrent_jobs": {
+                "description": "最大并发任务数",
+                "type": "int",
+                "default": 5
+            },
+            "enable_nsfw_filter": {
+                "description": "启用NSFW过滤",
+                "type": "bool",
+                "default": true
+            },
+            "auto_save_images": {
+                "description": "自动保存图像",
+                "type": "bool",
+                "default": true
+            },
+            "max_retry": {
+                "description": "最大重试次数",
+                "type": "int",
+                "default": 3
+            },
+            "timeout": {
+                "description": "超时时间(秒)",
+                "type": "float",
+                "default": 300
+            },
+            "proxy": {
+                "description": "HTTP 代理",
+                "type": "string",
+                "default": ""
+            }
+        }
+    },
+    "prefix_config": {
+        "description": "命令触发方式",
+        "type": "object",
+        "items": {
+            "prefix_enabled": {
+                "description": "启用前缀匹配",
+                "type": "bool",
+                "default": false
+            },
+            "prefix_list": {
+                "description": "命令前缀列表",
+                "type": "string",
+                "default": "/img,/aimg"
+            },
+            "coexist_enabled": {
+                "description": "混合模式",
+                "type": "bool",
+                "default": false
+            }
+        }
+    },
+    "gather_mode_config": {
+        "description": "收集模式配置",
+        "type": "object",
+        "items": {
+            "gather_mode_enabled": {
+                "description": "启用收集模式",
+                "type": "bool",
+                "default": false
+            }
+        }
+    },
+    "whitelist_config": {
+        "description": "白名单配置",
+        "type": "object",
+        "items": {
+            "whitelist_enabled": {
+                "description": "启用群组白名单",
+                "type": "bool",
+                "default": false
+            },
+            "whitelist_groups": {
+                "description": "白名单群组ID",
+                "type": "string",
+                "default": ""
+            },
+            "user_enabled": {
+                "description": "启用用户白名单",
+                "type": "bool",
+                "default": false
+            },
+            "user_whitelist": {
+                "description": "用户ID白名单",
+                "type": "string",
+                "default": ""
+            }
+        }
+    },
+    "llm_tool_settings": {
+        "description": "LLM函数调用工具配置",
+        "type": "object",
+        "items": {
+            "llm_tool_enabled": {
+                "description": "启用LLM工具调用",
+                "type": "bool",
+                "default": false
+            }
+        }
+    }
 }
