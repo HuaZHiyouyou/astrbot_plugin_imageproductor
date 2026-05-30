@@ -143,7 +143,8 @@ class BaseProvider(ABC):
         api_url: str,
         api_key: str,
         image_b64_list: list,
-        user_prompt: str
+        user_prompt: str,
+        use_chinese: bool = True
     ) -> str:
         """使用视觉模型分析参考图片，返回图片描述（由 AstrBot LLM 修饰为提示词）
 
@@ -152,6 +153,7 @@ class BaseProvider(ABC):
             api_key: 视觉模型 API Key
             image_b64_list: 图片base64列表 [(mime, b64_data), ...]
             user_prompt: 用户需求描述
+            use_chinese: 是否使用中文描述
 
         Returns:
             str: 图片描述（非完整提示词）
@@ -171,10 +173,9 @@ class BaseProvider(ABC):
                     }
                 })
 
-            # 添加分析提示 - 只返回图片描述，不生成完整提示词
-            content_parts.append({
-                "type": "text",
-                "text": f"""请详细描述这张图片的所有视觉元素，包括：
+            # 添加分析提示 - 根据配置决定使用中文或英文
+            if use_chinese:
+                analysis_prompt = f"""请详细描述这张/这些参考图片的所有视觉元素，包括：
 1. 主体内容（人物、物体、场景等）
 2. 颜色和色调
 3. 构图和布局
@@ -183,7 +184,26 @@ class BaseProvider(ABC):
 6. 氛围和情感
 7. 背景和细节
 
-请用中文描述，尽量详细。"""
+用户需求：{user_prompt}
+
+请用中文详细描述参考图片的视觉特征，后续会将用户需求融入其中。"""
+            else:
+                analysis_prompt = f"""Please describe all visual elements of these reference image(s) in detail, including:
+1. Main subjects (people, objects, scenes, etc.)
+2. Colors and tones
+3. Composition and layout
+4. Art style
+5. Lighting and shadows
+6. Atmosphere and mood
+7. Background and details
+
+User requirements: {user_prompt}
+
+Please describe the visual characteristics of the reference image(s) in detail in English. The user requirements will be integrated later."""
+
+            content_parts.append({
+                "type": "text",
+                "text": analysis_prompt
             })
 
             payload = {
@@ -222,3 +242,41 @@ class BaseProvider(ABC):
 
         # 如果分析失败，使用原始用户描述
         return user_prompt
+
+    def _get_api_config(self, use_vision: bool = False) -> Tuple[str, str]:
+        """获取API配置
+
+        Args:
+            use_vision: 是否使用视觉模型配置
+
+        Returns:
+            Tuple[str, str]: (api_key, api_url)
+        """
+        if use_vision:
+            api_key = self.config.get("backup_api_key", "")
+            api_url = self.config.get("backup_api_url", "")
+        else:
+            api_key = self.config.get("main_api_key", "")
+            api_url = self.config.get("main_api_url", "")
+        return api_key, api_url
+
+    def _rotate_api_key(self):
+        """轮询到下一个API Key"""
+        api_keys = self.config.get("main_api_keys", [])
+        if len(api_keys) <= 1:
+            return
+        
+        current_index = self.config.get("api_key_index", 0)
+        next_index = (current_index + 1) % len(api_keys)
+        self.config["api_key_index"] = next_index
+        self.config["main_api_key"] = api_keys[next_index]
+        
+        from astrbot.api import logger
+        logger.info(f"[ImageProducer] API Key已轮询: {current_index} -> {next_index}")
+
+    def _is_multimodal_model(self, model: str) -> bool:
+        """检查是否是多模态模型"""
+        multimodal_models = self.config.get("multimodal_models", [])
+        if not multimodal_models:
+            return False
+        return any(m in model.lower() for m in multimodal_models)

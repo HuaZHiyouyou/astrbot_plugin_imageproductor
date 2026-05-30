@@ -141,7 +141,8 @@ class GrokProvider(BaseProvider):
         api_url: str,
         api_key: str,
         image_b64_list: List[tuple],
-        original_prompt: str
+        original_prompt: str,
+        use_chinese: bool = True
     ) -> str:
         """使用 Grok Vision 分析参考图片，生成详细提示词"""
         try:
@@ -151,6 +152,7 @@ class GrokProvider(BaseProvider):
                 "Content-Type": "application/json"
             }
 
+            image_count = len(image_b64_list)
             content_parts = []
             for mime, b64_data in image_b64_list:
                 content_parts.append({
@@ -161,17 +163,36 @@ class GrokProvider(BaseProvider):
                     }
                 })
 
-            content_parts.append({
-                "type": "text",
-                "text": f"""Please analyze this reference image(s) and create a detailed image generation prompt.
+            if use_chinese:
+                analysis_text = f"""请分析这 {image_count} 张参考图片并创建一个极其详细的图像生成提示词。
+
+用户想要生成：{original_prompt}
+
+基于所有参考图片，创建一个详细的提示词：
+1. 描述每张参考图片的视觉风格、构图、主体、颜色、光线和氛围
+2. 识别所有参考图片的共同风格特征
+3. 保留参考图片的关键视觉元素
+4. 融入用户需求：{original_prompt}
+5. 包含：主体、环境、艺术风格、光线、色彩、构图、相机角度、质量关键词
+
+只返回最终提示词文本，150-300字。不要其他内容。"""
+            else:
+                analysis_text = f"""Please analyze these {image_count} reference image(s) and create an extremely detailed image generation prompt.
+
 The user wants to generate: {original_prompt}
 
-Based on the reference image(s), create a detailed prompt that:
-1. Describes the visual style, composition, and mood
-2. Preserves key visual elements from the reference
-3. Incorporates the user's request: {original_prompt}
+Based on ALL reference images, create a detailed prompt that:
+1. Describes the visual style, composition, subject, colors, lighting, and mood from each reference
+2. Identifies common style features across all reference images
+3. Preserves key visual elements from the references
+4. Incorporates the user's request: {original_prompt}
+5. Includes: subject, environment, art style, lighting, colors, composition, camera angle, quality keywords
 
-Only return the prompt text, nothing else. The prompt should be in English and detailed enough for image generation."""
+Only return the final prompt text, 150-300 words. Nothing else."""
+
+            content_parts.append({
+                "type": "text",
+                "text": analysis_text
             })
 
             payload = {
@@ -208,34 +229,74 @@ Only return the prompt text, nothing else. The prompt should be in English and d
         image_b64_list: List[tuple] = None,
         **kwargs
     ) -> ImageResult:
-        """使用普通图像生成API生成图像"""
+        """使用普通图像生成API生成图像
+        支持多模态模型直接接收图片输入
+        """
         from astrbot.api import logger
 
         width, height = self._parse_size(size)
 
-        if image_b64_list and len(image_b64_list) > 0:
-            enhanced_prompt = await self._analyze_reference_images(
-                api_url, api_key, image_b64_list, prompt
-            )
-        else:
-            enhanced_prompt = prompt
-
-        url = f"{api_url}/images/generations"
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
 
-        payload = {
-            "model": model,
-            "prompt": enhanced_prompt,
-            "n": 1,
-            "size": f"{width}x{height}",
-        }
+        # 检测是否支持多模态输入的模型
+        is_multimodal = self._is_multimodal_model(model)
+
+        if is_multimodal and image_b64_list and len(image_b64_list) > 0:
+            # 多模态模型：使用 Chat API 传入图片+文字
+            logger.info(f"[ImageProducer] 检测到多模态模型 {model}，使用 Chat API 传入 {len(image_b64_list)} 张图片")
+            
+            url = f"{api_url}/chat/completions"
+            
+            content_parts = []
+            for i, (mime, b64_data) in enumerate(image_b64_list, start=1):
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{mime};base64,{b64_data}",
+                        "detail": "high"
+                    }
+                })
+            
+            content_parts.append({
+                "type": "text",
+                "text": prompt
+            })
+
+            payload = {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": content_parts
+                    }
+                ],
+                "max_tokens": 8192,
+            }
+        else:
+            # 传统文生图模型：使用 /images/generations 端点
+            url = f"{api_url}/images/generations"
+            payload = {
+                "model": model,
+                "prompt": prompt,
+                "n": 1,
+                "size": f"{width}x{height}",
+            }
 
         async with self.session.post(url, headers=headers, json=payload) as response:
             if response.status == 200:
                 result = await response.json()
+                
+                # Chat API 返回格式
+                if "choices" in result and len(result["choices"]) > 0:
+                    message = result["choices"][0].get("message", {})
+                    content = message.get("content", "")
+                    if content:
+                        return ImageResult(success=True, b64_json=content)
+                
+                # Images API 返回格式
                 if "data" in result and len(result["data"]) > 0:
                     if "url" in result["data"][0]:
                         image_url = result["data"][0]["url"]
@@ -243,6 +304,7 @@ Only return the prompt text, nothing else. The prompt should be in English and d
                     elif "b64_json" in result["data"][0]:
                         b64_data = result["data"][0]["b64_json"]
                         return ImageResult(success=True, b64_json=b64_data)
+                        
                 return ImageResult(success=False, error="API 返回格式异常")
             else:
                 error_text = await response.text()
@@ -259,10 +321,14 @@ Only return the prompt text, nothing else. The prompt should be in English and d
         api_url: str = "",
         image_b64_list: list = None,
         auto_switch_mode: bool = True,
+        vision_processed: bool = False,
         **kwargs
     ) -> ImageResult:
         """调用 Grok API 生成图像
-        智能模式：当有参考图片时自动使用Chat模式，否则使用普通模式
+        智能模式：
+        1. 多模态模型（如 grok-2-image）：直接传入图片+文字
+        2. 传统模型+有参考图片：先通过视觉模型分析，再生成
+        3. 传统模型+无参考图片：直接文字生成
         """
         from astrbot.api import logger
 
@@ -272,24 +338,37 @@ Only return the prompt text, nothing else. The prompt should be in English and d
                 return ImageResult(success=False, error="API Key 未配置")
 
             has_images = bool(image_b64_list and len(image_b64_list) > 0)
+            gen_model = model or self.config.get("model", "grok-2-image")
+            
+            # 检测是否是多模态模型
+            is_multimodal = self._is_multimodal_model(gen_model)
 
-            if has_images and auto_switch_mode:
+            if is_multimodal and has_images:
+                # 多模态模型：直接传入图片+文字，不需要视觉模型分析
+                logger.info(f"[ImageProducer] 使用多模态模型 {gen_model}，直接传入 {len(image_b64_list)} 张图片")
+                api_key, api_url = self._get_api_config(use_vision=False)
+                return await self._generate_with_images_api(
+                    prompt, gen_model, size, api_key, api_url, image_b64_list, **kwargs
+                )
+            elif has_images and auto_switch_mode and not vision_processed:
+                # 传统模型+有参考图片：先通过视觉模型分析（仅当 main.py 未处理时）
                 logger.info(f"[ImageProducer] 检测到参考图片，使用视觉模型分析后生成")
                 vision_api_key, vision_api_url = self._get_api_config(use_vision=True)
-                vision_model = model or self.config.get("vision_model", "grok-2-vision")
                 enhanced_prompt = await self._analyze_reference_images(
                     vision_api_url, vision_api_key, image_b64_list, prompt
                 )
                 logger.info(f"[ImageProducer] 视觉模型分析完成，使用增强提示词生成图像")
                 api_key, api_url = self._get_api_config(use_vision=False)
-                gen_model = model or self.config.get("model", "grok-2-image")
                 return await self._generate_with_images_api(
-                    enhanced_prompt, gen_model, size, api_key, api_url, None, **kwargs
+                    enhanced_prompt, gen_model, size, api_key, api_url, image_b64_list, **kwargs
                 )
             else:
-                logger.info(f"[ImageProducer] 使用普通图像生成模式")
+                # 传统模型+无参考图片 或 vision_processed=True（已由 main.py 处理）：直接使用传入的 prompt
+                if vision_processed and has_images:
+                    logger.info(f"[ImageProducer] 视觉分析已在 main.py 完成，直接使用最终提示词")
+                else:
+                    logger.info(f"[ImageProducer] 使用普通图像生成模式")
                 api_key, api_url = self._get_api_config(use_vision=False)
-                gen_model = model or self.config.get("model", "grok-2-image")
                 return await self._generate_with_images_api(
                     prompt, gen_model, size, api_key, api_url, image_b64_list, **kwargs
                 )

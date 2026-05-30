@@ -1,8 +1,8 @@
 """
-字节跳动 Seed 图像生成 Provider
+字节跳动 Seed 图像生成 Provider (支持多模态模型)
 """
 
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, List
 
 from .base import BaseProvider, ImageResult
 
@@ -46,27 +46,66 @@ class SeedProvider(BaseProvider):
         image_b64_list: list = None,
         **kwargs
     ) -> ImageResult:
-        """调用字节 Seed API 生成图像"""
+        """调用字节 Seed API 生成图像
+        智能模式：
+        1. 多模态模型：直接传入图片+文字
+        2. 传统模型+有参考图片：先通过视觉模型分析，再生成
+        3. 传统模型+无参考图片：直接文字生成
+        """
+        from astrbot.api import logger
+
         try:
             api_key, api_url = self._get_api_config()
             if not api_key:
                 return ImageResult(success=False, error="API Key 未配置")
 
-            model = model or self.config.get("model", "seed-image")
-            width, height = self._parse_size(size)
+            has_images = bool(image_b64_list and len(image_b64_list) > 0)
+            gen_model = model or self.config.get("model", "seed-image")
+            
+            # 检测是否是多模态模型
+            is_multimodal = self._is_multimodal_model(gen_model)
 
+            width, height = self._parse_size(size)
             url = f"{api_url}/v1/images/generations"
             headers = {
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json"
             }
 
-            payload = {
-                "model": model,
-                "prompt": prompt,
-                "n": 1,
-                "size": f"{width}x{height}",
-            }
+            if is_multimodal and has_images:
+                # 多模态模型：直接传入图片+文字
+                logger.info(f"[ImageProducer] 使用多模态模型 {gen_model}，直接传入 {len(image_b64_list)} 张图片")
+                
+                content_parts = []
+                for i, (mime, b64_data) in enumerate(image_b64_list, start=1):
+                    content_parts.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{mime};base64,{b64_data}",
+                            "detail": "high"
+                        }
+                    })
+                
+                content_parts.append({
+                    "type": "text",
+                    "text": prompt
+                })
+
+                payload = {
+                    "model": gen_model,
+                    "prompt": content_parts,
+                    "n": 1,
+                    "size": f"{width}x{height}",
+                }
+            else:
+                # 传统文生图模型：只传入文字提示词
+                logger.info(f"[ImageProducer] 使用普通图像生成模式")
+                payload = {
+                    "model": gen_model,
+                    "prompt": prompt,
+                    "n": 1,
+                    "size": f"{width}x{height}",
+                }
 
             async with self.session.post(url, headers=headers, json=payload) as response:
                 if response.status == 200:
@@ -84,6 +123,7 @@ class SeedProvider(BaseProvider):
                     return ImageResult(success=False, error=f"API 错误: {response.status} - {error_text}")
 
         except Exception as e:
+            logger.error(f"[ImageProducer] Seed生成图片失败: {e}", exc_info=True)
             return ImageResult(success=False, error=str(e))
 
     async def test_connection(

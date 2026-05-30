@@ -143,7 +143,8 @@ class ZhipuProvider(BaseProvider):
         api_url: str,
         api_key: str,
         image_b64_list: List[tuple],
-        original_prompt: str
+        original_prompt: str,
+        use_chinese: bool = True
     ) -> str:
         """使用智谱 GLM-4V 分析参考图片，生成详细提示词"""
         from astrbot.api import logger
@@ -157,6 +158,7 @@ class ZhipuProvider(BaseProvider):
             }
 
             content_parts = []
+            image_count = len(image_b64_list)
             for i, (mime, b64_data) in enumerate(image_b64_list):
                 content_parts.append({
                     "type": "image_url",
@@ -166,18 +168,32 @@ class ZhipuProvider(BaseProvider):
                     }
                 })
 
-            analysis_prompt = f"""请极其详细地分析这张参考图片，并严格基于图片内容创建图像生成提示词。
+            if use_chinese:
+                analysis_prompt = f"""请极其详细地分析这 {image_count} 张参考图片，并严格基于图片内容创建图像生成提示词。
 
 【重要规则】
-1. 你必须准确描述图片中的：主体、颜色、构图、风格、光线、氛围等所有视觉元素
-2. 生成的提示词必须包含参考图片的所有关键视觉特征
-3. 提示词应该以英文撰写（这对图像生成模型很重要）
+1. 你必须准确描述每张图片中的：主体、颜色、构图、风格、光线、氛围等所有视觉元素
+2. 如果有{image_count}张图片，请分析它们的共同风格特征和视觉元素
+3. 生成的提示词必须包含参考图片的所有关键视觉特征
 4. 用户想要的内容应该融入参考图片的视觉风格中，而不是替代它
 
 用户想要生成的内容: {original_prompt}
 
 请按以下格式返回（只返回提示词，不要其他内容）：
-[英文详细描述，融合参考图片风格和用户需求]"""
+[详细描述，融合所有参考图片风格和用户需求，包含主体、环境、风格、光线、色彩、构图、质量关键词]"""
+            else:
+                analysis_prompt = f"""Please analyze these {image_count} reference image(s) in extreme detail and create an image generation prompt strictly based on the image content.
+
+【Important Rules】
+1. You must accurately describe each image: subject, color, composition, style, lighting, atmosphere and all visual elements
+2. If there are {image_count} images, please analyze their common style features and visual elements
+3. The generated prompt must include all key visual features from the reference images
+4. User requirements should be integrated into the visual style of the reference images, not replace them
+
+User wants to generate: {original_prompt}
+
+Please return in the following format (only return the prompt, no other content):
+[Detailed description, integrating all reference image styles and user requirements, including subject, environment, style, lighting, colors, composition, quality keywords]"""
 
             content_parts.append({
                 "type": "text",
@@ -221,34 +237,74 @@ class ZhipuProvider(BaseProvider):
         image_b64_list: List[tuple] = None,
         **kwargs
     ) -> ImageResult:
-        """使用普通图像生成API生成图像"""
+        """使用普通图像生成API生成图像
+        支持多模态模型直接接收图片输入
+        """
         from astrbot.api import logger
         
         width, height = self._parse_size(size)
 
-        if image_b64_list and len(image_b64_list) > 0:
-            enhanced_prompt = await self._analyze_reference_images(
-                api_url, api_key, image_b64_list, prompt
-            )
-        else:
-            enhanced_prompt = prompt
-
-        url = f"{api_url}/images/generations"
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
 
-        payload = {
-            "model": model,
-            "prompt": enhanced_prompt,
-            "n": 1,
-            "size": f"{width}x{height}",
-        }
+        # 检测是否支持多模态输入的模型
+        is_multimodal = self._is_multimodal_model(model)
+
+        if is_multimodal and image_b64_list and len(image_b64_list) > 0:
+            # 多模态模型：使用 Chat API 传入图片+文字
+            logger.info(f"[ImageProducer] 检测到多模态模型 {model}，使用 Chat API 传入 {len(image_b64_list)} 张图片")
+            
+            url = f"{api_url}/chat/completions"
+            
+            content_parts = []
+            for i, (mime, b64_data) in enumerate(image_b64_list, start=1):
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{mime};base64,{b64_data}",
+                        "detail": "high"
+                    }
+                })
+            
+            content_parts.append({
+                "type": "text",
+                "text": prompt
+            })
+
+            payload = {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": content_parts
+                    }
+                ],
+                "max_tokens": 8192,
+            }
+        else:
+            # 传统文生图模型：使用 /images/generations 端点
+            url = f"{api_url}/images/generations"
+            payload = {
+                "model": model,
+                "prompt": prompt,
+                "n": 1,
+                "size": f"{width}x{height}",
+            }
 
         async with self.session.post(url, headers=headers, json=payload) as response:
             if response.status == 200:
                 result = await response.json()
+                
+                # Chat API 返回格式
+                if "choices" in result and len(result["choices"]) > 0:
+                    message = result["choices"][0].get("message", {})
+                    content = message.get("content", "")
+                    if content:
+                        return ImageResult(success=True, b64_json=content)
+                
+                # Images API 返回格式
                 if "data" in result and len(result["data"]) > 0:
                     if "url" in result["data"][0]:
                         image_url = result["data"][0]["url"]
@@ -256,6 +312,7 @@ class ZhipuProvider(BaseProvider):
                     elif "b64_json" in result["data"][0]:
                         b64_data = result["data"][0]["b64_json"]
                         return ImageResult(success=True, b64_json=b64_data)
+                        
                 return ImageResult(success=False, error="API 返回格式异常")
             else:
                 error_text = await response.text()
@@ -272,10 +329,14 @@ class ZhipuProvider(BaseProvider):
         api_url: str = "",
         image_b64_list: list = None,
         auto_switch_mode: bool = True,
+        vision_processed: bool = False,
         **kwargs
     ) -> ImageResult:
         """调用智谱 AI API 生成图像
-        智能模式：当有参考图片时自动使用Chat模式，否则使用普通模式
+        智能模式：
+        1. 多模态模型（如 Cogview-4）：直接传入图片+文字
+        2. 传统模型+有参考图片：先通过视觉模型分析，再生成
+        3. 传统模型+无参考图片：直接文字生成
         """
         from astrbot.api import logger
         
@@ -285,27 +346,38 @@ class ZhipuProvider(BaseProvider):
                 return ImageResult(success=False, error="API Key 未配置")
 
             has_images = bool(image_b64_list and len(image_b64_list) > 0)
+            gen_model = model or self.config.get("model", "models/text-image-generation")
             
-            # 智能选择模式
-            if has_images and auto_switch_mode:
+            # 检测是否是多模态模型
+            is_multimodal = self._is_multimodal_model(gen_model)
+
+            if is_multimodal and has_images:
+                # 多模态模型：直接传入图片+文字，不需要视觉模型分析
+                logger.info(f"[ImageProducer] 使用多模态模型 {gen_model}，直接传入 {len(image_b64_list)} 张图片")
+                api_key, api_url = self._get_api_config(use_vision=False)
+                return await self._generate_with_images_api(
+                    prompt, gen_model, size, api_key, api_url, image_b64_list, **kwargs
+                )
+            elif has_images and auto_switch_mode and not vision_processed:
+                # 传统模型+有参考图片：先通过视觉模型分析（仅当 main.py 未处理时）
                 logger.info(f"[ImageProducer] 检测到参考图片，使用视觉模型分析后生成")
-                # 先用视觉模型分析图片，得到增强提示词
                 vision_api_key, vision_api_url = self._get_api_config(use_vision=True)
                 vision_model = model or self.config.get("vision_model", "glm-4v")
                 enhanced_prompt = await self._analyze_reference_images(
                     vision_api_url, vision_api_key, image_b64_list, prompt
                 )
                 logger.info(f"[ImageProducer] 视觉模型分析完成，使用增强提示词生成图像")
-                # 再用图像生成 API 生成图片
                 api_key, api_url = self._get_api_config(use_vision=False)
-                gen_model = model or self.config.get("model", "models/text-image-generation")
                 return await self._generate_with_images_api(
-                    enhanced_prompt, gen_model, size, api_key, api_url, None, **kwargs
+                    enhanced_prompt, gen_model, size, api_key, api_url, image_b64_list, **kwargs
                 )
             else:
-                logger.info(f"[ImageProducer] 使用普通图像生成模式")
+                # 传统模型+无参考图片 或 vision_processed=True（已由 main.py 处理）：直接使用传入的 prompt
+                if vision_processed and has_images:
+                    logger.info(f"[ImageProducer] 视觉分析已在 main.py 完成，直接使用最终提示词")
+                else:
+                    logger.info(f"[ImageProducer] 使用普通图像生成模式")
                 api_key, api_url = self._get_api_config(use_vision=False)
-                gen_model = model or self.config.get("model", "models/text-image-generation")
                 return await self._generate_with_images_api(
                     prompt, gen_model, size, api_key, api_url, image_b64_list, **kwargs
                 )

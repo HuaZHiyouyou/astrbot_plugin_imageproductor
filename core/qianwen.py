@@ -141,7 +141,8 @@ class QianwenProvider(BaseProvider):
         api_url: str,
         api_key: str,
         image_b64_list: List[tuple],
-        original_prompt: str
+        original_prompt: str,
+        use_chinese: bool = True
     ) -> str:
         """使用通义千问 VL 分析参考图片，生成详细提示词"""
         try:
@@ -151,6 +152,7 @@ class QianwenProvider(BaseProvider):
                 "Content-Type": "application/json"
             }
 
+            image_count = len(image_b64_list)
             content_parts = []
             for mime, b64_data in image_b64_list:
                 content_parts.append({
@@ -160,17 +162,36 @@ class QianwenProvider(BaseProvider):
                     }
                 })
 
-            content_parts.append({
-                "type": "text",
-                "text": f"""请分析这张参考图片，并创建一个详细的图像生成提示词。
+            if use_chinese:
+                analysis_text = f"""请分析这{image_count}张参考图片，并创建一个极其详细的图像生成提示词。
+
 用户想要生成的内容: {original_prompt}
 
-基于参考图片，请创建一个详细的提示词：
-1. 描述视觉风格、构图和氛围
-2. 保留参考图片的关键视觉元素
-3. 结合用户的需求: {original_prompt}
+基于所有参考图片，请创建一个详细的提示词：
+1. 描述每张参考图片的视觉风格、构图、主体、颜色、光线和氛围
+2. 识别所有参考图片的共同风格特征和视觉元素
+3. 保留参考图片的关键视觉特征
+4. 结合用户的需求: {original_prompt}
+5. 提示词应包含：主体、环境、艺术风格、光线、色彩、构图、视角、质量关键词
 
-只返回提示词文本，不要返回其他内容。提示词应该足够详细以便用于图像生成。"""
+只返回提示词文本，不要返回其他内容。提示词应该150-300字，足够详细以便用于图像生成。"""
+            else:
+                analysis_text = f"""Please analyze these {image_count} reference images and create an extremely detailed image generation prompt.
+
+The user wants to generate: {original_prompt}
+
+Based on ALL reference images, create a detailed prompt:
+1. Describe the visual style, composition, subject, colors, lighting, and atmosphere of each reference image
+2. Identify common style features and visual elements across all reference images
+3. Preserve key visual features from the references
+4. Incorporate the user's request: {original_prompt}
+5. The prompt should include: subject, environment, art style, lighting, colors, composition, camera angle, quality keywords
+
+Only return the prompt text, nothing else. The prompt should be 150-300 words, detailed enough for image generation."""
+
+            content_parts.append({
+                "type": "text",
+                "text": analysis_text
             })
 
             payload = {
@@ -207,38 +228,79 @@ class QianwenProvider(BaseProvider):
         image_b64_list: List[tuple] = None,
         **kwargs
     ) -> ImageResult:
-        """使用普通图像生成API生成图像"""
+        """使用普通图像生成API生成图像
+        支持多模态模型直接接收图片输入
+        """
         from astrbot.api import logger
 
         width, height = self._parse_size(size)
 
-        if image_b64_list and len(image_b64_list) > 0:
-            enhanced_prompt = await self._analyze_reference_images(
-                api_url, api_key, image_b64_list, prompt
-            )
-        else:
-            enhanced_prompt = prompt
-
-        url = f"{api_url}"
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
 
-        payload = {
-            "model": model,
-            "prompt": enhanced_prompt,
-            "n": 1,
-            "size": f"{width}x{height}",
-        }
+        # 检测是否支持多模态输入的模型
+        is_multimodal = self._is_multimodal_model(model)
+
+        if is_multimodal and image_b64_list and len(image_b64_list) > 0:
+            # 多模态模型：使用 Chat API 传入图片+文字
+            logger.info(f"[ImageProducer] 检测到多模态模型 {model}，使用 Chat API 传入 {len(image_b64_list)} 张图片")
+            
+            url = f"{api_url}"
+            
+            content_parts = []
+            for i, (mime, b64_data) in enumerate(image_b64_list, start=1):
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{mime};base64,{b64_data}",
+                        "detail": "high"
+                    }
+                })
+            
+            content_parts.append({
+                "type": "text",
+                "text": prompt
+            })
+
+            payload = {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": content_parts
+                    }
+                ],
+                "max_tokens": 8192,
+            }
+        else:
+            # 传统文生图模型：使用图像生成端点
+            url = f"{api_url}"
+            payload = {
+                "model": model,
+                "prompt": prompt,
+                "n": 1,
+                "size": f"{width}x{height}",
+            }
 
         async with self.session.post(url, headers=headers, json=payload) as response:
             if response.status == 200:
                 result = await response.json()
+                
+                # Chat API 返回格式
+                if "choices" in result and len(result["choices"]) > 0:
+                    message = result["choices"][0].get("message", {})
+                    content = message.get("content", "")
+                    if content:
+                        return ImageResult(success=True, b64_json=content)
+                
+                # Images API 返回格式
                 if "output" in result:
                     image_url = result["output"].get("url")
                     if image_url:
                         return ImageResult(success=True, image_url=image_url)
+                        
                 return ImageResult(success=False, error="API 返回格式异常")
             else:
                 error_text = await response.text()
@@ -255,10 +317,14 @@ class QianwenProvider(BaseProvider):
         api_url: str = "",
         image_b64_list: list = None,
         auto_switch_mode: bool = True,
+        vision_processed: bool = False,
         **kwargs
     ) -> ImageResult:
         """调用阿里云千问 API 生成图像
-        智能模式：当有参考图片时自动使用Chat模式，否则使用普通模式
+        智能模式：
+        1. 多模态模型（如 Qwen-VL）：直接传入图片+文字
+        2. 传统模型+有参考图片：先通过视觉模型分析，再生成
+        3. 传统模型+无参考图片：直接文字生成
         """
         from astrbot.api import logger
 
@@ -268,24 +334,37 @@ class QianwenProvider(BaseProvider):
                 return ImageResult(success=False, error="API Key 未配置")
 
             has_images = bool(image_b64_list and len(image_b64_list) > 0)
+            gen_model = model or self.config.get("model", "wanx-v1")
+            
+            # 检测是否是多模态模型
+            is_multimodal = self._is_multimodal_model(gen_model)
 
-            if has_images and auto_switch_mode:
+            if is_multimodal and has_images:
+                # 多模态模型：直接传入图片+文字，不需要视觉模型分析
+                logger.info(f"[ImageProducer] 使用多模态模型 {gen_model}，直接传入 {len(image_b64_list)} 张图片")
+                api_key, api_url = self._get_api_config(use_vision=False)
+                return await self._generate_with_images_api(
+                    prompt, gen_model, size, api_key, api_url, image_b64_list, **kwargs
+                )
+            elif has_images and auto_switch_mode and not vision_processed:
+                # 传统模型+有参考图片：先通过视觉模型分析（仅当 main.py 未处理时）
                 logger.info(f"[ImageProducer] 检测到参考图片，使用视觉模型分析后生成")
                 vision_api_key, vision_api_url = self._get_api_config(use_vision=True)
-                vision_model = model or self.config.get("vision_model", "qwen-vl-max")
                 enhanced_prompt = await self._analyze_reference_images(
                     vision_api_url, vision_api_key, image_b64_list, prompt
                 )
                 logger.info(f"[ImageProducer] 视觉模型分析完成，使用增强提示词生成图像")
                 api_key, api_url = self._get_api_config(use_vision=False)
-                gen_model = model or self.config.get("model", "wanx-v1")
                 return await self._generate_with_images_api(
-                    enhanced_prompt, gen_model, size, api_key, api_url, None, **kwargs
+                    enhanced_prompt, gen_model, size, api_key, api_url, image_b64_list, **kwargs
                 )
             else:
-                logger.info(f"[ImageProducer] 使用普通图像生成模式")
+                # 传统模型+无参考图片 或 vision_processed=True（已由 main.py 处理）：直接使用传入的 prompt
+                if vision_processed and has_images:
+                    logger.info(f"[ImageProducer] 视觉分析已在 main.py 完成，直接使用最终提示词")
+                else:
+                    logger.info(f"[ImageProducer] 使用普通图像生成模式")
                 api_key, api_url = self._get_api_config(use_vision=False)
-                gen_model = model or self.config.get("model", "wanx-v1")
                 return await self._generate_with_images_api(
                     prompt, gen_model, size, api_key, api_url, image_b64_list, **kwargs
                 )
