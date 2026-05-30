@@ -79,9 +79,9 @@
                 "default": "OpenAI"
             },
             "api_key": {
-                "description": "API密钥",
-                "type": "string",
-                "default": ""
+                "description": "API密钥列表",
+                "type": "list",
+                "default": [""]
             },
             "api_url": {
                 "description": "API地址",
@@ -137,9 +137,9 @@
                 "default": "Gemini"
             },
             "api_key": {
-                "description": "API密钥",
-                "type": "string",
-                "default": ""
+                "description": "API密钥列表",
+                "type": "list",
+                "default": [""]
             },
             "api_url": {
                 "description": "API地址",
@@ -194,9 +194,9 @@
                 "default": "Zhipu"
             },
             "api_key": {
-                "description": "API密钥",
-                "type": "string",
-                "default": ""
+                "description": "API密钥列表",
+                "type": "list",
+                "default": [""]
             },
             "api_url": {
                 "description": "API地址",
@@ -251,9 +251,9 @@
                 "default": "Qianwen"
             },
             "api_key": {
-                "description": "API密钥",
-                "type": "string",
-                "default": ""
+                "description": "API密钥列表",
+                "type": "list",
+                "default": [""]
             },
             "api_url": {
                 "description": "API地址",
@@ -308,9 +308,9 @@
                 "default": "Baidu"
             },
             "api_key": {
-                "description": "API密钥",
-                "type": "string",
-                "default": ""
+                "description": "API密钥列表",
+                "type": "list",
+                "default": [""]
             },
             "api_url": {
                 "description": "API地址",
@@ -365,9 +365,9 @@
                 "default": "Hunyuan"
             },
             "api_key": {
-                "description": "API密钥",
-                "type": "string",
-                "default": ""
+                "description": "API密钥列表",
+                "type": "list",
+                "default": [""]
             },
             "api_url": {
                 "description": "API地址",
@@ -400,6 +400,12 @@
                 "default": true
             }
         }
+    },
+    "multimodal_models": {
+        "description": "多模态模型列表",
+        "type": "string",
+        "default": "gpt-image-1,gpt-image-1-mini,gpt-image-2,gpt-image-1.5,gemini-2.5-flash-image,gemini-3.1-flash-image-preview,gemini-3-pro-image,imagen-4.0,grok-imagine-image,grok-imagine-image-pro,grok-2-image,grok-3-image,cogview-4,cogview-4-250304,wanx-v1,wanx2.1,wanx2.7-image,qwen-image,ernie-vilg,ernie-vilg-v2,ernie-vilg-4.0,hunyuan-image,hunyuan-image-3.0,seed-image,seed-vision,seedream-4.5,flux-2-flex,flux-2-pro,flux-pro-1.1,flux-kontext-pro",
+        "hint": "支持直接接收图片输入的模型，多个模型用逗号分隔。已预设各厂商主流多模态模型"
     },
     "preset_prompts": {
         "description": "预设提示词",
@@ -490,6 +496,18 @@
                 "description": "启用LLM工具调用",
                 "type": "bool",
                 "default": false
+            }
+        }
+    },
+    "prompt_settings": {
+        "description": "提示词设置",
+        "type": "object",
+        "items": {
+            "allow_chinese_prompt": {
+                "description": "允许中文提示词",
+                "type": "bool",
+                "default": false,
+                "hint": "开启后，所有提示词生成路径将使用中文输出，包括视觉分析、LLM修饰和直接生成"
             }
         }
     }
