@@ -8,6 +8,7 @@ import asyncio
 import os
 import base64
 import aiohttp
+import logging
 from io import BytesIO
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List
@@ -39,6 +40,9 @@ from .core import (
     DeepSeekVisionProvider,
     VolcanoVisionProvider,
     StepFunVisionProvider,
+    Base64Decoder,
+    TaskLogger,
+    TaskLoggerManager,
 )
 from .core.llm_tools import ImageProducerPromptTool, ImageProducerGenerateTool, ImageProducerPresetTool
 
@@ -124,9 +128,19 @@ class ImageProducer(Star):
         self.ai_images_dir = root_data_dir / "ai_images"
         self.refer_images_dir = data_dir / "refer_images"
         self.save_dir = data_dir / "save_images"
+        self.task_data_dir = data_dir / "task_data"
+        self.task_logs_dir = data_dir / "task_logs"
         os.makedirs(self.ai_images_dir, exist_ok=True)
         os.makedirs(self.refer_images_dir, exist_ok=True)
         os.makedirs(self.save_dir, exist_ok=True)
+        os.makedirs(self.task_data_dir, exist_ok=True)
+        os.makedirs(self.task_logs_dir, exist_ok=True)
+
+        # 初始化插件数据目录的文件日志
+        self._setup_file_logger(data_dir)
+        
+        # 初始化任务日志管理器
+        self.task_logger_manager = TaskLoggerManager(self.task_logs_dir)
 
         self.session: Optional[aiohttp.ClientSession] = None
 
@@ -143,6 +157,9 @@ class ImageProducer(Star):
         self.auto_save_images = common_config.get("auto_save_images", True)
         self.save_images = common_config.get("auto_save_images", True)
         self.max_retry = common_config.get("max_retry", 3)
+        self.retry_enabled = common_config.get("retry_enabled", True)
+        self.retry_interval = common_config.get("retry_interval", 3)
+        self.retry_count = common_config.get("retry_count", 3)
         self.proxy = common_config.get("proxy", "")
         self.timeout = common_config.get("timeout", 300)
 
@@ -163,6 +180,43 @@ class ImageProducer(Star):
         self.semaphore = asyncio.Semaphore(self.max_concurrent_jobs)
         self.running_tasks: Dict[str, asyncio.Task] = {}
 
+    def _setup_file_logger(self, data_dir: Path):
+        """初始化插件数据目录的文件日志"""
+        log_dir = data_dir / "logs"
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = log_dir / "imageproducer.log"
+
+        self.file_logger = logging.getLogger("ImageProducerFile")
+        self.file_logger.setLevel(logging.INFO)
+        # 避免重复添加 handler
+        if not self.file_logger.handlers:
+            fh = logging.FileHandler(log_file, encoding="utf-8")
+            fh.setLevel(logging.INFO)
+            formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+            fh.setFormatter(formatter)
+            self.file_logger.addHandler(fh)
+
+    def _log(self, msg: str, panel: bool = False):
+        """
+        日志输出方法
+        - 始终写入文件日志（全量记录）
+        - panel=True 时才输出到 AstrBot 面板（仅关键信息）
+        防止多人聊天时面板日志爆炸导致卡死
+        """
+        self.file_logger.info(msg)
+        if panel:
+            logger.info(f"[ImageProducer] {msg}")
+
+    def _save_task_data(self, task_id: str, data: dict):
+        """保存任务全量数据到本地文件"""
+        try:
+            import json
+            task_file = self.task_data_dir / f"{task_id}.json"
+            with open(task_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self.file_logger.error(f"保存任务数据失败: {e}")
+
     async def initialize(self):
         session_kwargs = {
             "timeout": aiohttp.ClientTimeout(total=self.timeout)
@@ -171,6 +225,11 @@ class ImageProducer(Star):
             session_kwargs["proxy"] = self.proxy
             logger.info(f"[ImageProducer] 已配置代理: {self.proxy}")
         self.session = aiohttp.ClientSession(**session_kwargs)
+        
+        # 初始化 Base64 解码器
+        self.base64_decoder = Base64Decoder(self.ai_images_dir, self.session)
+        logger.info(f"[ImageProducer] 已初始化 Base64 解码器，保存目录: {self.ai_images_dir}")
+        
         self.init_providers()
 
         if self.llm_tool_enabled:
@@ -383,18 +442,72 @@ class ImageProducer(Star):
         return preset_prompt
 
     def _get_message_text(self, event: AstrMessageEvent) -> str:
-        if hasattr(event, 'message_str'):
-            return event.message_str.strip()
-        if hasattr(event, 'get_plain_text'):
-            return event.get_plain_text().strip()
-        if hasattr(event, 'message'):
-            msg = event.message
-            if hasattr(msg, 'extract_plain_text'):
-                return msg.extract_plain_text().strip()
-            return str(msg).strip()
-        if hasattr(event, 'content'):
-            return str(event.content).strip()
-        return ""
+        """提取消息文本，处理各种可能的属性"""
+        text_parts = []
+        
+        # 方法1: 遍历消息链组件（AstrBot 标准做法）
+        try:
+            if hasattr(event, 'get_messages'):
+                messages = event.get_messages()
+                logger.debug(f"[ImageProducer] 消息链组件数: {len(messages)}")
+                for comp in messages:
+                    comp_type = type(comp).__name__
+                    if isinstance(comp, Comp.Plain):
+                        if hasattr(comp, 'text') and comp.text:
+                            text_parts.append(comp.text)
+                            logger.debug(f"[ImageProducer] 提取 Plain 组件文本: {comp.text[:50]}")
+                    # 检查是否有其他文本组件类型
+                    elif hasattr(comp, 'text') and comp.text:
+                        # 尝试获取任何有 text 属性的组件
+                        text_parts.append(comp.text)
+                        logger.debug(f"[ImageProducer] 提取 {comp_type} 组件文本: {comp.text[:50]}")
+            else:
+                logger.debug(f"[ImageProducer] event 没有 get_messages 方法")
+        except Exception as e:
+            logger.warning(f"[ImageProducer] 遍历消息链失败: {e}")
+        
+        # 方法2: message_str 属性（兼容旧版本）
+        if not text_parts:
+            try:
+                if hasattr(event, 'message_str') and event.message_str:
+                    text_parts.append(event.message_str)
+                    logger.debug(f"[ImageProducer] 使用 message_str: {event.message_str[:50]}")
+            except Exception:
+                pass
+        
+        # 方法3: get_plain_text 方法（兼容旧版本）
+        if not text_parts:
+            try:
+                if hasattr(event, 'get_plain_text'):
+                    plain_text = event.get_plain_text()
+                    if plain_text:
+                        text_parts.append(plain_text)
+                        logger.debug(f"[ImageProducer] 使用 get_plain_text: {plain_text[:50]}")
+            except Exception:
+                pass
+        
+        # 方法4: 直接访问 message_obj
+        if not text_parts:
+            try:
+                if hasattr(event, 'message_obj'):
+                    msg_obj = event.message_obj
+                    if hasattr(msg_obj, 'content'):
+                        content = msg_obj.content
+                        if isinstance(content, str):
+                            text_parts.append(content)
+                            logger.debug(f"[ImageProducer] 使用 message_obj.content: {content[:50]}")
+                        elif isinstance(content, list):
+                            for item in content:
+                                if hasattr(item, 'text') and item.text:
+                                    text_parts.append(item.text)
+            except Exception:
+                pass
+        
+        # 合并所有文本部分
+        text = ''.join(text_parts).strip()
+        
+        # 确保返回字符串，不是 None
+        return text if text else ""
 
     def _extract_prompt(self, text: str) -> str:
         import re
@@ -832,11 +945,11 @@ class ImageProducer(Star):
 
         # 白名单检查
         if not self.is_group_allowed(event):
-            await self._safe_reply(event, "❌ 当前群组不在白名单中，无法使用图像生成功能")
+            await self._safe_reply(event, "喵...当前群组不在白名单中，小猫咪无法为你生成图片喵～")
             return
 
         if not self.is_user_allowed(event):
-            await self._safe_reply(event, "❌ 当前用户不在白名单中，无法使用图像生成功能")
+            await self._safe_reply(event, "喵...当前用户不在白名单中，小猫咪无法为你生成图片喵～")
             return
 
         # 收集模式处理
@@ -848,11 +961,11 @@ class ImageProducer(Star):
     @filter.command("img", alias={"aimg", "生图", "ai生图"})
     async def generate_image_command(self, event: AstrMessageEvent):
         if not self.is_group_allowed(event):
-            await self._safe_reply(event, "❌ 当前群组不在白名单中，无法使用图像生成功能")
+            await self._safe_reply(event, "喵...当前群组不在白名单中，小猫咪无法为你生成图片喵～")
             return
 
         if not self.is_user_allowed(event):
-            await self._safe_reply(event, "❌ 当前用户不在白名单中，无法使用图像生成功能")
+            await self._safe_reply(event, "喵...当前用户不在白名单中，小猫咪无法为你生成图片喵～")
             return
 
         if self.gather_mode_enabled:
@@ -863,9 +976,22 @@ class ImageProducer(Star):
     async def _generate_image_direct_mode(self, event: AstrMessageEvent, override_text: str = None):
         """直接模式：立即生成图片"""
         text = override_text if override_text is not None else self._get_message_text(event)
+        
+        # 先检查是否是子命令（支持无空格格式如 /img平台）
+        text_stripped = text.strip()
+        sub_commands = {
+            "帮助": "帮助", "help": "帮助",
+            "设置": "设置", "config": "设置",
+            "平台": "平台", "platform": "平台",
+        }
+        for cmd, sub_cmd in sub_commands.items():
+            if text_stripped.lower().startswith(f"/img{cmd}".lower()) or text_stripped.lower().startswith(f"/aimg{cmd}".lower()):
+                await self._handle_img_subcommand(event, sub_cmd)
+                return
+        
         prompt = self._extract_prompt(text)
 
-        # 检查是否是子命令
+        # 检查是否是子命令（支持有空格的格式如 /img 平台）
         if prompt:
             sub_command = prompt.strip().lower()
             if sub_command in ["帮助", "help", "设置", "config", "平台", "platform"]:
@@ -906,7 +1032,7 @@ class ImageProducer(Star):
             else:
                 prompt = f"{prompt}, reference image style, maintain the artistic approach and composition from the reference"
         elif not prompt:
-            await self._safe_reply(event, "💡 请提供图像生成提示词\n示例: /img 一只可爱的猫咪在草地上玩耍\n使用预设: /img 手办化 一只猫")
+            await self._safe_reply(event, "喵～请提供图像生成提示词喵\n示例: /img 一只可爱的猫咪在草地上玩耍\n使用预设: /img 手办化 一只猫")
             return
 
         await self._generate_and_send(event, prompt, image_b64_list, use_llm_refine=False)
@@ -914,18 +1040,18 @@ class ImageProducer(Star):
     @filter.command("文生图", alias={"text2img", "t2i"})
     async def text_to_image_command(self, event: AstrMessageEvent):
         if not self.is_group_allowed(event):
-            await self._safe_reply(event, "❌ 当前群组不在白名单中，无法使用此功能")
+            await self._safe_reply(event, "喵...当前群组不在白名单中，小猫咪无法为你服务喵～")
             return
 
         if not self.is_user_allowed(event):
-            await self._safe_reply(event, "❌ 当前用户不在白名单中，无法使用此功能")
+            await self._safe_reply(event, "喵...当前用户不在白名单中，小猫咪无法为你服务喵～")
             return
 
         text = self._get_message_text(event)
         text = text.replace('/文生图', '').replace('/text2img', '').replace('/t2i', '').strip()
 
         if not text:
-            await self._safe_reply(event, "💡 请提供图像描述，我将直接生成图片\n示例: /文生图 一只可爱的猫咪在草地上玩耍")
+            await self._safe_reply(event, "喵～请提供图像描述，小猫咪将直接生成图片喵\n示例: /文生图 一只可爱的猫咪在草地上玩耍")
             return
 
         await self._generate_and_send(event, text, None, use_llm_refine=False)
@@ -933,11 +1059,11 @@ class ImageProducer(Star):
     @filter.command("图生图", alias={"img2img", "i2i", "以图生图", "参考生图"})
     async def image_to_image_command(self, event: AstrMessageEvent):
         if not self.is_group_allowed(event):
-            await self._safe_reply(event, "❌ 当前群组不在白名单中，无法使用此功能")
+            await self._safe_reply(event, "喵...当前群组不在白名单中，小猫咪无法为你服务喵～")
             return
 
         if not self.is_user_allowed(event):
-            await self._safe_reply(event, "❌ 当前用户不在白名单中，无法使用此功能")
+            await self._safe_reply(event, "喵...当前用户不在白名单中，小猫咪无法为你服务喵～")
             return
 
         text = self._get_message_text(event)
@@ -952,7 +1078,7 @@ class ImageProducer(Star):
                 logger.info(f"[ImageProducer] 图生图成功下载 {len(image_b64_list)} 张图片")
 
         if not text and not image_b64_list:
-            await self._safe_reply(event, "💡 请发送参考图片，可选附带文字提示\n示例: [图片] /图生图 改成动漫风格")
+            await self._safe_reply(event, "喵～请发送参考图片，可选附带文字提示喵\n示例: [图片] /图生图 改成动漫风格")
             return
 
         if not text:
@@ -966,32 +1092,32 @@ class ImageProducer(Star):
     async def _handle_img_subcommand(self, event: AstrMessageEvent, sub_command: str):
         """处理 img 子命令（帮助、设置、平台等）"""
         if sub_command in ["帮助", "help"]:
-            help_text = """📖 AI 图像生成器 - 使用帮助
+            help_text = """喵～AI 图像生成器使用指南喵～
 
-【直接生成指令（不调用LLM）】
-• /img [提示词] - 根据文字直接生成图片
-• /img [图片] - 以图生图
-• /img [图片] [提示词] - 参考图片+文字直接生成
-• /文生图 [提示词] - 纯文字直接生成
-• /图生图 [图片] [提示词] - 参考图片直接生成
+【直接生成指令】
+• /img [提示词] - 根据文字直接生成图片喵
+• /img [图片] - 以图生图喵
+• /img [图片] [提示词] - 参考图片+文字直接生成喵
+• /文生图 [提示词] - 纯文字直接生成喵
+• /图生图 [图片] [提示词] - 参考图片直接生成喵
 
 【LLM优化生成】
-• /生成 [描述] - 先调用LLM优化提示词，再生成图片
-• /提示词 [描述] - 仅生成优化后的提示词
+• /生成 [描述] - 先调用LLM优化提示词，再生成图片喵
+• /提示词 [描述] - 仅生成优化后的提示词喵
 
 【预设风格】
-• /img列表 - 查看所有预设
-• /img查看 [名称] - 查看预设详情
+• /img列表 - 查看所有预设喵
+• /img查看 [名称] - 查看预设详情喵
 
 【智能功能】
-• 主提供商失败自动切换备用
-• 支持多图参考融合
+• 主提供商失败自动切换备用喵
+• 支持多图参考融合喵
 
-💡 提示：/img、/文生图、/图生图 直接调用图像API，不经过LLM"""
+小猫咪提示：/img、/文生图、/图生图 直接调用图像API，不经过LLM喵～"""
             await self._safe_reply(event, help_text)
             
         elif sub_command in ["设置", "config"]:
-            settings_text = """⚙️ 当前配置信息
+            settings_text = """喵～当前配置信息喵～
 
 【主提供商】
 """
@@ -1004,12 +1130,12 @@ class ImageProducer(Star):
                 enabled = main_provider.get("enabled", False)
                 settings_text += f"""• 名称：{api_name}
 • API类型：{api_type}
-• 状态：{"✅ 已启用" if enabled else "❌ 已禁用"}
+• 状态：{"已启用喵" if enabled else "已禁用喵"}
 • 生成模型：{model}
 • 视觉模型：{vision_model}
 """
             else:
-                settings_text += "• 未配置\n"
+                settings_text += "• 未配置喵\n"
             
             settings_text += "\n【备用提供商】\n"
             back_providers = ["back_provider", "back_provider2", "back_provider3", "back_provider4", "back_provider5"]
@@ -1029,11 +1155,11 @@ class ImageProducer(Star):
 • 并发任务数：{self.max_concurrent_jobs}
 • 超时时间：{self.timeout}秒
 
-💡 请在插件设置页面修改配置"""
+小猫咪提示：请在插件设置页面修改配置喵～"""
             await self._safe_reply(event, settings_text)
             
         elif sub_command in ["平台", "platform"]:
-            platform_text = """🔄 提供商状态
+            platform_text = """喵～提供商状态喵～
 
 【当前默认平台】：{}""".format(self.default_platform)
 
@@ -1042,18 +1168,18 @@ class ImageProducer(Star):
                 api_name = pconfig.get("api_name", pname)
                 model = pconfig.get("model", "未配置")
                 vision_model = pconfig.get("vision_model", "未配置")
-                is_default = "⭐" if pname == self.default_platform else "  "
+                is_default = "* " if pname == self.default_platform else "  "
                 platform_text += f"{is_default}{api_name}：{pname}\n"
                 platform_text += f"   生成模型：{model}\n"
                 platform_text += f"   视觉模型：{vision_model}\n"
             
             platform_text += """
 【降级机制】
-• 主提供商失败后，依次尝试备用提供商
+• 主提供商失败后，依次尝试备用提供商喵
 • 最多重试 {} 次
 • 支持 6 个提供商配置
 
-💡 请在插件设置页面配置多个提供商""".format(self.max_retry)
+小猫咪提示：请在插件设置页面配置多个提供商喵～""".format(self.max_retry)
             await self._safe_reply(event, platform_text)
 
     async def _generate_image_gather_mode(self, event: AstrMessageEvent):
@@ -1073,16 +1199,16 @@ class ImageProducer(Star):
         operator_id = event.get_sender_id()
         is_cancel = False
 
-        await self._safe_reply(event, f"""📝 绘图收集模式已启用
+        await self._safe_reply(event, f"""喵～绘图收集模式已启用喵
 提示词：{prompt or "（待输入）"}
 图片：{len(image_b64_list)} 张
 
-💡 操作说明：
-• 发送图片可追加参考图
-• 发送文字可追加到提示词
-• 发送「开始」立即生成
-• 发送「取消」退出操作
-• 60 秒内有效""")
+小猫咪提示：
+• 发送图片可追加参考图喵
+• 发送文字可追加到提示词喵
+• 发送「开始」立即生成喵
+• 发送「取消」退出操作喵
+• 60 秒内有效喵""")
 
         @session_waiter(timeout=60, record_history_chains=False)
         async def waiter(controller: SessionController, sub_event: AstrMessageEvent):
@@ -1095,13 +1221,13 @@ class ImageProducer(Star):
 
             if sub_text == "取消":
                 is_cancel = True
-                await self._safe_reply(sub_event, "✅ 操作已取消")
+                await self._safe_reply(sub_event, "喵～操作已取消喵")
                 controller.stop()
                 return
 
             if sub_text == "开始":
                 if not prompt and not image_b64_list:
-                    await self._safe_reply(sub_event, "❌ 没有可用的提示词或参考图，请先发送内容")
+                    await self._safe_reply(sub_event, "喵...没有可用的提示词或参考图，请先发送内容喵")
                     controller.keep(timeout=60, reset_timeout=True)
                     return
                 controller.stop()
@@ -1121,13 +1247,13 @@ class ImageProducer(Star):
                     prompt = sub_prompt
 
             if not prompt and not image_b64_list:
-                await self._safe_reply(sub_event, "❌ 还没有输入任何内容，请发送图片或文字")
+                await self._safe_reply(sub_event, "喵...还没有输入任何内容，请发送图片或文字喵")
             else:
-                await self._safe_reply(sub_event, f"""📝 已收集：
+                await self._safe_reply(sub_event, f"""喵～已收集：
 提示词：{prompt or "（待输入）"}
 图片：{len(image_b64_list)} 张
 
-💡 继续发送内容，或发送「开始」生成""")
+小猫咪提示：继续发送内容，或发送「开始」生成喵""")
 
             controller.keep(timeout=60, reset_timeout=True)
 
@@ -1135,14 +1261,14 @@ class ImageProducer(Star):
             await waiter(event)
         except Exception as e:
             logger.error(f"[ImageProducer] 收集模式出错: {e}", exc_info=True)
-            await self._safe_reply(event, "❌ 处理时发生错误")
+            await self._safe_reply(event, "喵...处理时发生错误喵")
             return
         finally:
             if is_cancel:
                 return
 
         if not prompt and not image_b64_list:
-            await self._safe_reply(event, "❌ 收集超时，已取消操作")
+            await self._safe_reply(event, "喵...收集超时，已取消操作喵")
             return
 
         if not prompt:
@@ -1153,25 +1279,25 @@ class ImageProducer(Star):
     @filter.command("提示词", alias={"prompt", "生提示词"})
     async def generate_prompt_command(self, event: AstrMessageEvent):
         if not self.is_group_allowed(event):
-            await self._safe_reply(event, "❌ 当前群组不在白名单中，无法使用此功能")
+            await self._safe_reply(event, "喵...当前群组不在白名单中，小猫咪无法为你服务喵～")
             return
 
         if not self.is_user_allowed(event):
-            await self._safe_reply(event, "❌ 当前用户不在白名单中，无法使用此功能")
+            await self._safe_reply(event, "喵...当前用户不在白名单中，小猫咪无法为你服务喵～")
             return
 
         text = self._get_message_text(event)
         text = text.replace('/提示词', '').replace('/prompt', '').replace('/生提示词', '').strip()
 
         if not text:
-            await self._safe_reply(event, "💡 请提供图像描述，我将为你生成专业提示词\n示例: /提示词 一只可爱的猫咪在草地上玩耍")
+            await self._safe_reply(event, "喵～请提供图像描述，小猫咪将为你生成专业提示词喵\n示例: /提示词 一只可爱的猫咪在草地上玩耍")
             return
 
         prompt = await self._generate_prompt(text, event)
         if prompt:
-            await self._safe_reply(event, f"✨ 生成的提示词:\n{prompt}")
+            await self._safe_reply(event, f"喵～生成的提示词喵:\n{prompt}")
         else:
-            await self._safe_reply(event, "❌ 提示词生成失败，请稍后重试")
+            await self._safe_reply(event, "喵...提示词生成失败，请稍后重试喵")
 
     async def _generate_prompt(self, user_description: str, event: AstrMessageEvent = None) -> Optional[str]:
         try:
@@ -1418,57 +1544,30 @@ Generate a detailed, high-quality English prompt that preserves the reference im
     async def _llm_tool_job(self, event: AstrMessageEvent, prompt: str, size: str = None, image_b64_list: list = None) -> Dict[str, Any]:
         """
         LLM工具调用的后台任务
-        返回字典形式的结果
+        走完整的 _generate_and_send 流程（视觉分析→提示词修饰→生成→保存→多重发送）
+        不再直接调用底层 API，确保与 /img 命令行为一致
         """
         try:
-            logger.info(f"[ImageProducer] LLM工具任务开始: {prompt[:50]}...")
-            use_size = size if size else self.default_size
+            self._log(f"[LLM工具] 任务开始，提示词: {prompt[:80]}...", panel=True)
             
-            async with self.semaphore:
-                result = await asyncio.wait_for(
-                    self.generate_image_internal(
-                        platform=self.default_platform,
-                        prompt=prompt,
-                        size=use_size,
-                        quality=self.default_quality,
-                        style=self.default_style,
-                        image_b64_list=image_b64_list,
-                    ),
-                    timeout=180
-                )
+            # 走完整流程：视觉分析 → 提示词修饰 → 生成 → 保存 → 多重发送
+            # LLM 工具调用时 AI 已经给出了提示词，不需要再修饰（use_llm_refine=False）
+            await self._generate_and_send(
+                event=event,
+                prompt=prompt,
+                image_b64_list=image_b64_list,
+                use_llm_refine=False,
+            )
             
-            if result.success:
-                logger.info(f"[ImageProducer] 图像生成成功")
-                image_b64_data = None
-                save_path = None
-                
-                if result.image_data:
-                    image_b64_data = base64.b64encode(result.image_data).decode('utf-8')
-                    save_path = await self._save_image_to_ai_images(result.image_data, prompt)
-                elif result.image_url:
-                    save_path = await self._download_and_save_to_ai_images(result.image_url, prompt)
-                    if save_path:
-                        try:
-                            with open(save_path, 'rb') as f:
-                                image_b64_data = base64.b64encode(f.read()).decode('utf-8')
-                        except:
-                            pass
-                
-                return {
-                    "success": True,
-                    "image_b64": image_b64_data,
-                    "save_path": save_path,
-                    "image_url": result.image_url
-                }
-            else:
-                logger.error(f"[ImageProducer] 图像生成失败: {result.error}")
-                return {
-                    "success": False,
-                    "error": result.error
-                }
+            self._log(f"[LLM工具] 完整流程执行完毕", panel=True)
+            return {
+                "success": True,
+                "message": "图片生成完成，已发送给用户。"
+            }
                 
         except Exception as e:
             logger.error(f"[ImageProducer] LLM工具任务异常: {e}", exc_info=True)
+            self.file_logger.error(f"LLM工具任务异常: {e}")
             return {
                 "success": False,
                 "error": str(e)
@@ -1477,11 +1576,11 @@ Generate a detailed, high-quality English prompt that preserves the reference im
     @filter.command("生成", alias={"gen", "做图"})
     async def two_stage_generate_command(self, event: AstrMessageEvent):
         if not self.is_group_allowed(event):
-            await self._safe_reply(event, "❌ 当前群组不在白名单中，无法使用此功能")
+            await self._safe_reply(event, "喵...当前群组不在白名单中，小猫咪无法为你服务喵～")
             return
 
         if not self.is_user_allowed(event):
-            await self._safe_reply(event, "❌ 当前用户不在白名单中，无法使用此功能")
+            await self._safe_reply(event, "喵...当前用户不在白名单中，小猫咪无法为你服务喵～")
             return
 
         text = self._get_message_text(event)
@@ -1497,17 +1596,29 @@ Generate a detailed, high-quality English prompt that preserves the reference im
                 logger.info(f"[ImageProducer] 成功下载 {len(image_b64_list)} 张图片")
 
         if not text and not image_b64_list:
-            await self._safe_reply(event, "💡 请提供图像描述，我将为你生成专业提示词并创作图像\n示例: /生成 一只可爱的猫咪在草地上玩耍")
+            await self._safe_reply(event, "喵～请提供图像描述，小猫咪将为你生成专业提示词并创作图像喵\n示例: /生成 一只可爱的猫咪在草地上玩耍")
             return
 
-        await self._safe_reply(event, f"🎨 正在生成专业提示词...\n描述: {text or '基于参考图片'}")
+        # 记录开始消息，避免重复发送
+        start_msg_sent = False
+        await self._safe_reply(event, f"喵～正在生成专业提示词喵...\n描述: {text or '基于参考图片'}")
+        start_msg_sent = True
 
         prompt = await self._generate_prompt(text or "基于参考图片生成图像", event)
+        prompt_generation_failed = False
         if not prompt:
-            await self._safe_reply(event, "❌ 提示词生成失败，尝试直接生成图像...")
+            prompt_generation_failed = True
+            # 不发送失败消息，直接使用原始描述作为提示词
             prompt = text or "根据参考图片生成图像"
+            logger.info(f"[ImageProducer] 提示词生成失败，使用原始描述: {prompt[:50]}")
 
-        await self._safe_reply(event, f"✨ 提示词生成完成\n正在生成图像...")
+        # 根据提示词生成结果发送不同的消息
+        if prompt_generation_failed:
+            # 只在提示词生成失败时提示，但不说"失败"，而是说"使用简化版"
+            await self._safe_reply(event, f"喵～使用简化提示词生成图像喵...\n提示词: {prompt[:100]}...")
+        else:
+            await self._safe_reply(event, f"喵～提示词生成完成喵\n正在生成图像...")
+        
         await self._generate_and_send(event, prompt, image_b64_list)
 
     async def _generate_and_send(self, event: AstrMessageEvent, prompt: str, image_b64_list: list = None, use_llm_refine: bool = True):
@@ -1521,17 +1632,43 @@ Generate a detailed, high-quality English prompt that preserves the reference im
         Args:
             use_llm_refine: 是否使用LLM修饰提示词（/文生图、/图生图设为False，/生成设为True）
         """
+        # 生成任务ID，用于记录全量任务数据
+        import time as _time
+        task_id = f"task_{int(_time.time() * 1000)}"
+        
+        # 创建任务日志器
+        task_logger = await self.task_logger_manager.create_logger(task_id)
+        task_logger.info(f"任务开始，提示词: {prompt[:100]}...")
+        task_logger.stage_start("准备")
+        
+        task_start = _time.time()
+        task_data = {
+            "task_id": task_id,
+            "start_time": _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(task_start)),
+            "start_timestamp": task_start,
+            "prompt": prompt,
+            "image_count": len(image_b64_list) if image_b64_list else 0,
+            "use_llm_refine": use_llm_refine,
+            "stages": {}
+        }
+        
         # === 阶段 1: 准备 ===
         try:
             if not self.provider_map:
-                await self._safe_reply(event, "❌ 未配置任何图像生成平台，请先在插件设置中配置API")
+                await self._safe_reply(event, "喵...未配置任何图像生成平台，请先在插件设置中配置API喵")
+                task_logger.fail("未配置任何图像生成平台")
                 return
-            logger.info(f"[ImageProducer] 开始生成图像，提示词: {prompt[:50]}...")
+            self._log(f"[{task_id}] 开始生成图像，提示词: {prompt[:50]}...")
+            task_logger.info(f"提供商列表: {list(self.provider_map.keys())}")
             
             # 发送"正在生成"的消息
-            await self._safe_reply(event, "🎨 正在生成图像...")
+            await self._safe_reply(event, "喵～正在生成图像喵...")
         except Exception as e:
             logger.error(f"[ImageProducer] 发送开始消息失败，但继续尝试: {e}", exc_info=True)
+            task_logger.warning(f"发送开始消息失败: {e}")
+        
+        task_logger.stage_end("准备")
+        task_logger.stage_start("加载参考图片")
         
         # 加载预设参考图片并合并
         refer_images_b64 = await self._load_refer_images()
@@ -1539,7 +1676,7 @@ Generate a detailed, high-quality English prompt that preserves the reference im
             image_b64_list = refer_images_b64
         elif refer_images_b64:
             image_b64_list = refer_images_b64 + image_b64_list
-            logger.info(f"[ImageProducer] 合并预设参考图片后共 {len(image_b64_list)} 张")
+            self._log(f"[{task_id}] 合并预设参考图片后共 {len(image_b64_list)} 张")
         
         # === 阶段 2: 生成图片 ===
         result = None
@@ -1565,39 +1702,50 @@ Generate a detailed, high-quality English prompt that preserves the reference im
                 vision_api_key = main_provider_config.get("vision_api_key", "")
                 vision_api_url = main_provider_config.get("vision_api_url", "")
                 if vision_api_key and vision_api_url:
-                    logger.info(f"[ImageProducer] 开始视觉模型分析图片...")
-                    image_description = await provider._analyze_reference_images(
-                        vision_api_url, vision_api_key, image_b64_list, prompt,
-                        use_chinese=self.allow_chinese_prompt
-                    )
-                    logger.info(f"[ImageProducer] 视觉模型分析完成: {image_description[:50]}...")
-                    vision_processed = True
-                    
-                    # 使用 LLM 修饰图片描述和用户描述（仅当 use_llm_refine=True 时）
-                    if use_llm_refine:
-                        logger.info(f"[ImageProducer] 开始 LLM 修饰...")
-                        refined_prompt = await self._refine_prompt_with_llm(image_description, prompt, event)
-                        if refined_prompt:
-                            final_prompt = refined_prompt
-                            logger.info(f"[ImageProducer] LLM 修饰完成，使用新提示词: {final_prompt[:50]}...")
+                    try:
+                        logger.info(f"[ImageProducer] 开始视觉模型分析图片...")
+                        image_description = await provider._analyze_reference_images(
+                            vision_api_url, vision_api_key, image_b64_list, prompt,
+                            use_chinese=self.allow_chinese_prompt
+                        )
+                        logger.info(f"[ImageProducer] 视觉模型分析完成: {image_description[:50]}...")
+                        vision_processed = True
+                        
+                        # 使用 LLM 修饰图片描述和用户描述（仅当 use_llm_refine=True 时）
+                        if use_llm_refine:
+                            logger.info(f"[ImageProducer] 开始 LLM 修饰...")
+                            try:
+                                refined_prompt = await self._refine_prompt_with_llm(image_description, prompt, event)
+                                if refined_prompt:
+                                    final_prompt = refined_prompt
+                                    logger.info(f"[ImageProducer] LLM 修饰完成，使用新提示词: {final_prompt[:50]}...")
+                                else:
+                                    logger.warning(f"[ImageProducer] LLM 修饰失败，使用视觉模型分析结果")
+                                    final_prompt = image_description
+                            except Exception as refine_err:
+                                logger.error(f"[ImageProducer] LLM 修饰异常: {refine_err}")
+                                final_prompt = image_description
                         else:
-                            logger.warning(f"[ImageProducer] LLM 修饰失败，使用视觉模型分析结果")
-                            final_prompt = image_description
-                    else:
-                        # 不使用LLM修饰，将用户提示词与图片描述结合，确保多图参考生效
-                        if self.allow_chinese_prompt:
-                            if prompt:
-                                final_prompt = f"{prompt}。请参考提供的图片的风格、构图、光线、色彩搭配和艺术手法，保持与参考图片的视觉一致性，同时融入描述中的元素。"
+                            # 不使用LLM修饰，将用户提示词与图片描述结合，确保多图参考生效
+                            if self.allow_chinese_prompt:
+                                if prompt:
+                                    final_prompt = f"{prompt}。请参考提供的图片的风格、构图、光线、色彩搭配和艺术手法，保持与参考图片的视觉一致性，同时融入描述中的元素。"
+                                else:
+                                    final_prompt = f"根据参考图片生成图像。{image_description}。保持与参考图片相同的风格、构图、光线、色彩搭配和艺术手法。"
                             else:
-                                final_prompt = f"根据参考图片生成图像。{image_description}。保持与参考图片相同的风格、构图、光线、色彩搭配和艺术手法。"
-                        else:
-                            if prompt:
-                                final_prompt = f"{prompt}. Reference the provided image(s) for style, composition, lighting, color palette, and artistic approach. Maintain visual consistency with the reference image(s) while incorporating the described elements."
-                            else:
-                                final_prompt = f"Generate an image based on the reference image(s). {image_description}. Maintain the same style, composition, lighting, color palette, and artistic approach as shown in the reference image(s)."
-                        logger.info(f"[ImageProducer] 不使用LLM修饰，结合用户提示词与图片描述")
+                                if prompt:
+                                    final_prompt = f"{prompt}. Reference the provided image(s) for style, composition, lighting, color palette, and artistic approach. Maintain visual consistency with the reference image(s) while incorporating the described elements."
+                                else:
+                                    final_prompt = f"Generate an image based on the reference image(s). {image_description}. Maintain the same style, composition, lighting, color palette, and artistic approach as shown in the reference image(s)."
+                            logger.info(f"[ImageProducer] 不使用LLM修饰，结合用户提示词与图片描述")
+                    except Exception as vision_err:
+                        logger.error(f"[ImageProducer] 视觉模型分析失败: {vision_err}", exc_info=True)
+                        # 视觉模型失败，继续使用原始提示词
+                        logger.info(f"[ImageProducer] 视觉模型失败，使用原始提示词继续生成")
                 else:
                     logger.info(f"[ImageProducer] 未配置视觉模型，使用原始提示词")
+            else:
+                logger.warning(f"[ImageProducer] 未找到默认提供商: {self.default_platform}")
             
             if vision_provider_name and vision_provider_name in self.provider_map:
                 target_platform = vision_provider_name
@@ -1612,141 +1760,221 @@ Generate a detailed, high-quality English prompt that preserves the reference im
                 logger.info(f"[ImageProducer] 检测到图片，但未找到可用提供商，继续使用默认平台: {target_platform}")
         
         try:
-            try:
-                async with self.semaphore:
-                    result = await asyncio.wait_for(
-                        self.generate_image_internal(
-                            platform=target_platform,
-                            prompt=final_prompt,
-                            size=self.default_size,
-                            quality=self.default_quality,
-                            style=self.default_style,
-                            image_b64_list=image_b64_list,
-                            auto_switch_mode=not vision_processed,
-                            vision_processed=vision_processed,
-                        ),
-                        timeout=180
-                    )
-            except asyncio.TimeoutError:
-                logger.error(f"[ImageProducer] 生成图像超时（3分钟）")
-                result = None
-            except Exception as e:
-                logger.error(f"[ImageProducer] 生成过程异常: {e}", exc_info=True)
-                result = None
+            # 不使用 asyncio.wait_for 强制超时，让 API 自己控制超时
+            # 一旦任务开始就必须走完，避免中断正在生成中的任务
+            # 移除 semaphore 限制，每个任务独立运行互不影响
+            api_start = _time.time()
+            task_data["stages"]["api_call"] = {
+                "start_time": _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(api_start)),
+                "platform": target_platform,
+                "prompt": final_prompt,
+                "size": self.default_size,
+                "quality": self.default_quality,
+                "style": self.default_style,
+                "image_count": len(image_b64_list) if image_b64_list else 0,
+                "vision_processed": vision_processed,
+            }
+            self._log(f"[{task_id}] 调用API生成图片，平台: {target_platform}")
+            
+            result = await self.generate_image_internal(
+                platform=target_platform,
+                prompt=final_prompt,
+                size=self.default_size,
+                quality=self.default_quality,
+                style=self.default_style,
+                model="",  # 让 provider 使用配置中的默认模型
+                image_b64_list=image_b64_list,
+                auto_switch_mode=not vision_processed,
+                vision_processed=vision_processed,
+            )
+            
+            api_end = _time.time()
+            task_data["stages"]["api_call"]["end_time"] = _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(api_end))
+            task_data["stages"]["api_call"]["duration_seconds"] = round(api_end - api_start, 2)
+            
+            # 记录API返回结果
+            if result:
+                task_data["stages"]["api_call"]["success"] = result.success
+                task_data["stages"]["api_call"]["has_image_url"] = bool(result.image_url)
+                task_data["stages"]["api_call"]["has_image_data"] = bool(result.image_data)
+                task_data["stages"]["api_call"]["has_b64_json"] = bool(result.b64_json)
+                if result.image_url:
+                    task_data["stages"]["api_call"]["image_url"] = result.image_url
+                if result.error:
+                    task_data["stages"]["api_call"]["error"] = result.error
+                self._log(f"[{task_id}] API返回: success={result.success}, 耗时={task_data['stages']['api_call']['duration_seconds']}s", panel=True)
+            else:
+                task_data["stages"]["api_call"]["success"] = False
+                task_data["stages"]["api_call"]["error"] = "result is None"
         except Exception as e:
             logger.error(f"[ImageProducer] 阶段2总异常: {e}", exc_info=True)
+            self.file_logger.error(f"阶段2总异常: {e}")
+            result = None
+            task_data["stages"]["api_call"]["success"] = False
+            task_data["stages"]["api_call"]["error"] = str(e)
         
-        # === 阶段 3: 处理结果（保存到本地）===
-        download_success = False  # 记录下载是否成功
+        # === 阶段 3: 处理结果（统一提取 + 备用方案链）===
+        task_logger.stage_start("提取保存")
+        download_success = False
+        save_path = None
+        image_b64_data = None
+        extracted_url = None
+        save_start = _time.time()
         try:
             if result and result.success:
-                logger.info("[ImageProducer] 图像生成成功，处理数据...")
-                try:
-                    if result.image_data:
-                        save_path = await self._save_image_to_ai_images(result.image_data, prompt)
-                        image_b64_data = base64.b64encode(result.image_data).decode('utf-8')
-                        download_success = True
-                    elif result.b64_json:
-                        import re
-                        b64_content = result.b64_json.strip()
-                        # 检查是否是 Markdown 图片格式 ![image](url)
-                        md_match = re.search(r'!\[.*?\]\((https?://[^\s)]+)\)', b64_content)
-                        if md_match:
-                            # 提取 URL 并下载
-                            image_url = md_match.group(1)
-                            logger.info(f"[ImageProducer] 检测到 Markdown 图片链接: {image_url}")
-                            save_path = await self._download_and_save_to_ai_images(image_url, prompt)
-                            if save_path:
-                                try:
-                                    with open(save_path, 'rb') as f:
-                                        image_b64_data = base64.b64encode(f.read()).decode('utf-8')
-                                    download_success = True
-                                except Exception as read_err:
-                                    logger.warning(f"[ImageProducer] 读取保存的图片失败: {read_err}")
-                            else:
-                                # 下载失败，保留 URL
-                                result.image_url = image_url
-                        else:
-                            # 真正的 base64 数据
-                            image_b64_data = b64_content
-                            save_path = await self._save_image_to_ai_images(base64.b64decode(b64_content), prompt)
-                            download_success = True
-                    elif result.image_url:
-                        logger.info(f"[ImageProducer] 下载图片: {result.image_url}")
-                        save_path = await self._download_and_save_to_ai_images(result.image_url, prompt)
-                        if save_path:
-                            try:
-                                with open(save_path, 'rb') as f:
-                                    image_b64_data = base64.b64encode(f.read()).decode('utf-8')
-                                download_success = True
-                            except Exception as read_err:
-                                logger.warning(f"[ImageProducer] 读取保存的图片失败: {read_err}")
-                        # 下载失败，保留 URL 用于后续发送
-                except Exception as e:
-                    logger.error(f"[ImageProducer] 处理图片数据异常: {e}", exc_info=True)
+                # 记录数据来源
+                if result.image_url:
+                    self._log(f"[{task_id}] API返回URL: {result.image_url}", panel=True)
+                    task_logger.info(f"API返回URL: {result.image_url}")
+                elif result.image_data:
+                    self._log(f"[{task_id}] API返回image_data: {len(result.image_data)} bytes")
+                    task_logger.info(f"API返回image_data: {len(result.image_data)} bytes")
+                elif result.b64_json:
+                    b64_preview = result.b64_json[:50]
+                    self._log(f"[{task_id}] API返回b64_json: 长度={len(result.b64_json)} (预览: {b64_preview}...)")
+                    task_logger.info(f"API返回b64_json: 长度={len(result.b64_json)}")
+                    # 解码过程很快，不需要单独提示用户
+
+                self._log(f"[{task_id}] 开始提取并保存图片...")
+                
+                # 使用统一提取方法（含备用方案链 + 下载重试 + 图片验证）
+                extract_info = await self._extract_and_save_image(result, prompt, task_id, event)
+                save_path = extract_info["save_path"]
+                image_b64_data = extract_info["image_b64_data"]
+                extracted_url = extract_info["image_url"]
+                download_success = extract_info["download_success"]
+                
+                # 更新 result.image_url（如果提取到了新URL）
+                if extracted_url and not result.image_url:
+                    result.image_url = extracted_url
+                
+                self._log(f"[{task_id}] 提取结果: source={extract_info['source']}, success={download_success}")
+                task_logger.stage_end("提取保存", download_success)
         except Exception as e:
             logger.error(f"[ImageProducer] 阶段3总异常: {e}", exc_info=True)
+            self.file_logger.error(f"阶段3总异常: {e}")
+            task_logger.error(f"阶段3异常: {e}")
+            task_logger.stage_end("提取保存", False)
+        
+        save_end = _time.time()
+        task_data["stages"]["save"] = {
+            "start_time": _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(save_start)),
+            "end_time": _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(save_end)),
+            "duration_seconds": round(save_end - save_start, 2),
+            "download_success": download_success,
+            "save_path": save_path,
+        }
         
         # === 阶段 4: 发送给用户 ===
+        task_logger.stage_start("发送图片")
+        send_start = _time.time()
+        send_method_used = None
         try:
             if result and result.success:
-                image_sent = False
+                # 确定 URL 用于显示和殿后
+                display_url = result.image_url or extracted_url
                 
-                # 如果下载成功，尝试发送图片
+                # 只在下载成功时发送图片（不发送额外提示消息）
                 if download_success:
-                    # 1. 优先使用本地文件发送
-                    if save_path and os.path.exists(save_path):
-                        try:
-                            msg_chain: list[BaseMessageComponent] = [
-                                Comp.Reply(id=event.message_obj.message_id) if hasattr(event.message_obj, 'message_id') else None,
-                                Comp.Image.fromFileSystem(save_path)
-                            ]
-                            msg_chain = [c for c in msg_chain if c is not None]
-                            await event.send(MessageChain(chain=msg_chain))
-                            logger.info(f"[ImageProducer] 图片发送成功 (路径: {save_path})")
-                            image_sent = True
-                        except Exception as pic_err:
-                            logger.warning(f"[ImageProducer] 发送本地图片失败: {pic_err}")
-                    
-                    # 2. 本地发送失败，尝试 base64
-                    if not image_sent and image_b64_data:
-                        try:
-                            msg_chain = [
-                                Comp.Reply(id=event.message_obj.message_id) if hasattr(event.message_obj, 'message_id') else None,
-                                Comp.Image.fromBase64(image_b64_data)
-                            ]
-                            msg_chain = [c for c in msg_chain if c is not None]
-                            await event.send(MessageChain(chain=msg_chain))
-                            logger.info("[ImageProducer] 图片发送成功 (base64)")
-                            image_sent = True
-                        except Exception as b64_err:
-                            logger.warning(f"[ImageProducer] 发送 base64 图片失败: {b64_err}")
-                    
-                    # 3. base64 也失败，使用 URL
-                    if not image_sent and result.image_url:
-                        await self._safe_reply(event, f"🎨 图片链接:\n{result.image_url}")
-                        image_sent = True
-                    
+                    # 使用多重方法 + 重试发送，不压缩原图
+                    retry_count = self.retry_count if self.retry_enabled else 1
+                    image_sent, method_used = await self._send_image_with_retry(
+                        event,
+                        save_path=save_path,
+                        image_b64_data=image_b64_data,
+                        image_url=display_url,
+                        max_retries=retry_count
+                    )
+                    send_method_used = method_used if image_sent else None
+
                     if not image_sent:
-                        await self._safe_reply(event, "❌ 图片发送失败，请查看日志")
+                        # 所有方法都失败，尝试压缩后重新发送（兜底）
+                        self._log(f"[{task_id}] 所有发送方法失败，尝试压缩图片后重新发送...")
+                        task_logger.warning("发送失败，尝试压缩后重新发送")
+                        try:
+                            # 读取原始图片数据
+                            if save_path and os.path.exists(save_path):
+                                with open(save_path, 'rb') as f:
+                                    original_data = f.read()
+                            elif image_b64_data:
+                                original_data = base64.b64decode(image_b64_data)
+                            else:
+                                original_data = None
+
+                            if original_data:
+                                compressed_data = self._compress_image(original_data, max_size_kb=512)
+                                compressed_path = await self._save_image_to_ai_images(
+                                    compressed_data, prompt, compress=False
+                                )
+                                if compressed_path:
+                                    compressed_b64 = base64.b64encode(compressed_data).decode('utf-8')
+                                    image_sent, method_used = await self._send_image_with_retry(
+                                        event,
+                                        save_path=compressed_path,
+                                        image_b64_data=compressed_b64,
+                                        image_url=display_url,
+                                        max_retries=1
+                                    )
+                                    if image_sent:
+                                        self._log(f"[{task_id}] 压缩后发送成功 (方法: {method_used})")
+                                        send_method_used = f"压缩+{method_used}"
+                        except Exception as compress_err:
+                            logger.error(f"[ImageProducer] 压缩兜底发送失败: {compress_err}")
+                            self.file_logger.error(f"压缩兜底发送失败: {compress_err}")
+
+                    if not image_sent:
+                        # 所有发送方法都失败，URL 作为最后的降级方案（殿后）
+                        self._log(f"[{task_id}] 所有发送方式（含压缩兜底）都失败", panel=True)
+                        send_method_used = "失败"
+                        
+                        # 殿后：发送 URL 让用户手动访问
+                        if display_url:
+                            fallback_msg = f"喵...图片发送失败，请手动访问链接查看喵：\n{display_url}"
+                        elif save_path:
+                            fallback_msg = f"喵...图片发送失败，图片已保存至喵：\n{save_path}"
+                        else:
+                            fallback_msg = "喵...图片发送失败，请稍后重试喵"
+                        await self._safe_reply(event, fallback_msg)
                 else:
-                    # 下载失败，直接发送 URL
-                    if result.image_url:
-                        await self._safe_reply(event, f"🎨 图片链接:\n{result.image_url}")
-                        image_sent = True
-                    else:
-                        await self._safe_reply(event, "❌ 图片下载失败，请查看日志")
-                    
+                    # 下载失败，URL/路径已在上面显示
+                    self._log(f"[{task_id}] 图片下载失败，已显示URL/路径", panel=True)
+                    send_method_used = "URL"
+
             elif result and not result.success:
-                await self._safe_reply(event, f"❌ 图像生成失败: {result.error}")
+                if result.image_url:
+                    self._log(f"[{task_id}] 图像生成失败，但存在URL: {result.image_url}，错误: {result.error}", panel=True)
+                else:
+                    self._log(f"[{task_id}] 图像生成失败（无URL）: {result.error}", panel=True)
+                if self._is_safety_blocked(result.error):
+                    self._log(f"[{task_id}] 图像生成被安全策略拦截: {result.error}")
+                    await self._safe_reply(event, "喵...提示词可能触发了内容安全策略，无法生成图片喵。请尝试修改描述后重试喵。")
+                else:
+                    await self._safe_reply(event, f"喵...图像生成失败喵: {result.error}")
+                send_method_used = "生成失败"
             else:
-                await self._safe_reply(event, "⏰ 图像生成超时，请稍后重试")
-        
+                self._log(f"[{task_id}] 图像生成超时（无结果），提示词: {prompt[:50]}...", panel=True)
+                await self._safe_reply(event, "喵...图像生成超时，请稍后重试喵")
+                send_method_used = "超时"
+
         except Exception as send_err:
             logger.error(f"[ImageProducer] 阶段4消息发送异常: {send_err}", exc_info=True)
-        
-        # === 完成 ===
-        logger.info("[ImageProducer] 整个流程结束")
+            self.file_logger.error(f"阶段4消息发送异常: {send_err}")
+            send_method_used = f"异常: {send_err}"
+
+        send_end = _time.time()
+        task_data["stages"]["send"] = {
+            "start_time": _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(send_start)),
+            "end_time": _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(send_end)),
+            "duration_seconds": round(send_end - send_start, 2),
+            "method_used": send_method_used,
+        }
+
+        # 记录总耗时并保存任务数据
+        task_end = _time.time()
+        task_data["end_time"] = _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(task_end))
+        task_data["total_duration_seconds"] = round(task_end - task_start, 2)
+        self._save_task_data(task_id, task_data)
+        self._log(f"[{task_id}] 整个流程结束，总耗时: {task_data['total_duration_seconds']}s", panel=True)
 
     async def generate_image_internal(
         self,
@@ -1760,11 +1988,20 @@ Generate a detailed, high-quality English prompt that preserves the reference im
         auto_switch_mode: bool = True,
         vision_processed: bool = False
     ) -> ImageResult:
+        # 检查 provider_map 是否为空
+        if not self.provider_map:
+            error_msg = "未加载任何提供商，请检查配置"
+            logger.error(f"[ImageProducer] {error_msg}")
+            return ImageResult(success=False, error=error_msg)
+        
         provider = self.provider_map.get(platform)
         if not provider:
-            return ImageResult(success=False, error=f"未找到平台: {platform}")
+            error_msg = f"未找到平台: {platform}，可用平台: {list(self.provider_map.keys())}"
+            logger.error(f"[ImageProducer] {error_msg}")
+            return ImageResult(success=False, error=error_msg)
 
         last_error = None
+        error_details = []  # 记录所有 provider 的错误详情
 
         fallback_providers = []
         for pname, p in self.provider_map.items():
@@ -1776,6 +2013,7 @@ Generate a detailed, high-quality English prompt that preserves the reference im
         for provider_name, current_provider in all_providers:
             for attempt in range(self.max_retry):
                 try:
+                    logger.info(f"[ImageProducer] 尝试 Provider {provider_name} (第 {attempt + 1} 次)")
                     result = await current_provider.generate_image(
                         prompt=prompt,
                         size=size,
@@ -1792,19 +2030,42 @@ Generate a detailed, high-quality English prompt that preserves the reference im
                         return result
 
                     last_error = result.error
+                    error_details.append(f"{provider_name}: {last_error}")
                     logger.warning(f"[ImageProducer] Provider {provider_name} 生成失败: {last_error}")
 
+                    # 检查是否应该立即返回（不重试）
                     if self._should_not_retry(last_error):
                         logger.info(f"[ImageProducer] 检测到不可重试错误，停止重试: {last_error}")
                         return result
 
+                    # 关键：API 已成功调用但返回失败结果，不重试（避免重复扣费）
+                    # 只有网络错误、连接超时才重试
+                    if not self._is_network_error(last_error):
+                        logger.info(f"[ImageProducer] API 已响应（非网络错误），不重试以避免重复扣费")
+                        return result
+
                     if attempt < self.max_retry - 1:
-                        logger.info(f"[ImageProducer] Provider {provider_name} 第 {attempt + 1} 次重试")
+                        logger.info(f"[ImageProducer] Provider {provider_name} 网络错误，第 {attempt + 1} 次重试")
                 except Exception as e:
                     last_error = str(e)
+                    error_details.append(f"{provider_name}: {last_error}")
                     logger.error(f"[ImageProducer] Provider {provider_name} 生成异常: {e}", exc_info=True)
+                    
+                    # 异常情况：只有网络相关异常才重试
+                    if self._is_network_error(last_error) and attempt < self.max_retry - 1:
+                        logger.info(f"[ImageProducer] Provider {provider_name} 网络异常，第 {attempt + 1} 次重试")
+                    else:
+                        # 非网络异常，不重试
+                        break
 
-        return ImageResult(success=False, error=last_error or "所有Provider生成图像失败")
+        # 构建详细的错误信息
+        if error_details:
+            detailed_error = f"所有Provider生成图像失败:\n" + "\n".join([f"  • {detail}" for detail in error_details])
+        else:
+            detailed_error = "所有Provider生成图像失败（无详细错误信息）"
+        
+        logger.error(f"[ImageProducer] {detailed_error}")
+        return ImageResult(success=False, error=detailed_error)
 
     def _should_not_retry(self, error: str) -> bool:
         """判断是否不应该重试
@@ -1814,6 +2075,7 @@ Generate a detailed, high-quality English prompt that preserves the reference im
         - API Key无效
         - 模型不存在
         - 参数错误
+        - 安全策略拦截（400错误）
         """
         if not error:
             return False
@@ -1845,94 +2107,538 @@ Generate a detailed, high-quality English prompt that preserves the reference im
             "rate limit",
             "配额",
             "quota",
+            "could not be used",
+            "not suitable for image",
+            "may be blocked",
+            "safety policies",
+            "content_filter",
+            "content filter",
         ]
         
         return any(keyword in error_lower for keyword in no_retry_keywords)
+    
+    def _is_safety_blocked(self, error: str) -> bool:
+        """判断是否是安全策略拦截导致的错误"""
+        if not error:
+            return False
+        
+        error_lower = error.lower()
+        safety_keywords = [
+            "safety",
+            "blocked",
+            "could not be used",
+            "not suitable",
+            "content policy",
+            "content_filter",
+            "may be blocked",
+        ]
+        return any(keyword in error_lower for keyword in safety_keywords)
+
+    def _is_network_error(self, error: str) -> bool:
+        """判断是否是网络相关错误（可以重试）
+        
+        只有以下情况才重试：
+        - 连接超时
+        - 网络不可达
+        - DNS 解析失败
+        - 连接被拒绝
+        - SSL 错误
+        
+        其他错误（如 API 返回的错误）不重试，避免重复扣费
+        """
+        if not error:
+            return False
+        
+        error_lower = error.lower()
+        
+        # 网络相关错误关键词
+        network_keywords = [
+            "timeout",
+            "超时",
+            "timed out",
+            "connection refused",
+            "连接被拒绝",
+            "connection reset",
+            "连接重置",
+            "network unreachable",
+            "网络不可达",
+            "dns",
+            "name resolution",
+            "ssl",
+            "certificate",
+            "证书",
+            "socket",
+            "eof",
+            "connection closed",
+            "连接关闭",
+            "connect call failed",
+            "aiohttp client error",
+        ]
+        
+        return any(keyword in error_lower for keyword in network_keywords)
+
+    def _detect_image_format(self, image_data: bytes) -> str:
+        """检测图片实际格式并返回正确的扩展名"""
+        try:
+            # 检查文件头魔数
+            if image_data[:8] == b'\x89PNG\r\n\x1a\n':
+                return 'png'
+            elif image_data[:2] == b'\xff\xd8':
+                return 'jpg'
+            elif image_data[:4] == b'GIF8':
+                return 'gif'
+            elif image_data[:4] == b'RIFF' and image_data[8:12] == b'WEBP':
+                return 'webp'
+            else:
+                # 尝试用 PIL 检测
+                with Image.open(BytesIO(image_data)) as img:
+                    fmt = img.format
+                    if fmt:
+                        return fmt.lower()
+                return 'jpg'  # 默认 jpg
+        except Exception:
+            return 'jpg'
+
+    def _compress_image(self, image_data: bytes, max_size_kb: int = 1024) -> bytes:
+        """压缩图片以减小文件大小，仅在发送全部失败时作为兜底使用"""
+        try:
+            with Image.open(BytesIO(image_data)) as img:
+                # 如果是动画图片，只取第一帧
+                if getattr(img, 'is_animated', False):
+                    img.seek(0)
+
+                # 转换为 RGB（如果是 RGBA 或其他模式）
+                if img.mode not in ('RGB', 'L'):
+                    img = img.convert('RGB')
+
+                # 先尝试压缩到目标大小
+                quality = 85
+                while quality > 20:
+                    buf = BytesIO()
+                    img.save(buf, format='JPEG', quality=quality, optimize=True)
+                    if buf.tell() <= max_size_kb * 1024:
+                        break
+                    quality -= 10
+
+                # 如果还是太大，缩小尺寸
+                buf = BytesIO()
+                img.save(buf, format='JPEG', quality=quality, optimize=True)
+                result_size = buf.tell()
+
+                if result_size > max_size_kb * 1024:
+                    # 按比例缩小
+                    scale = (max_size_kb * 1024 / result_size) ** 0.5
+                    new_size = (int(img.width * scale), int(img.height * scale))
+                    img = img.resize(new_size, Image.Resampling.LANCZOS)
+                    buf = BytesIO()
+                    img.save(buf, format='JPEG', quality=quality, optimize=True)
+
+                logger.info(f"[ImageProducer] 图片压缩完成: {len(image_data)} -> {buf.tell()} bytes")
+                return buf.getvalue()
+        except Exception as e:
+            logger.warning(f"[ImageProducer] 图片压缩失败，使用原图: {e}")
+            return image_data
+
+    async def _send_image_with_retry(self, event: AstrMessageEvent, save_path: str = None,
+                                     image_b64_data: str = None, image_url: str = None,
+                                     max_retries: int = 2) -> Tuple[bool, str]:
+        """
+        多种方法发送图片，每种方法带重试，避免一次熔断
+
+        发送策略（按优先级）：
+        1. 本地文件路径发送（质量最好）
+        2. base64 发送
+        3. URL 发送
+        4. 压缩后重新发送（兜底）
+
+        每种方法重试 max_retries 次，失败才降级到下一个方法。
+
+        Returns:
+            (是否成功, 使用的方法名)
+        """
+        methods = []
+        last_err = None
+
+        # 方法1: 本地文件发送
+        if save_path and os.path.exists(save_path):
+            methods.append(("local_file", save_path))
+
+        # 方法2: base64 发送
+        if image_b64_data:
+            methods.append(("base64", image_b64_data))
+
+        # 方法3: URL 发送
+        if image_url:
+            methods.append(("url", image_url))
+
+        for method_name, method_data in methods:
+            last_err = None
+            for attempt in range(1, max_retries + 1):
+                try:
+                    if method_name == "local_file":
+                        msg_chain: list[BaseMessageComponent] = [
+                            Comp.Reply(id=event.message_obj.message_id) if hasattr(event.message_obj, 'message_id') else None,
+                            Comp.Image.fromFileSystem(method_data)
+                        ]
+                        msg_chain = [c for c in msg_chain if c is not None]
+                        await event.send(MessageChain(chain=msg_chain))
+                        self._log(f"图片发送成功 (方法: 本地文件, 路径: {method_data})")
+                        return True, "本地文件"
+
+                    elif method_name == "base64":
+                        msg_chain = [
+                            Comp.Reply(id=event.message_obj.message_id) if hasattr(event.message_obj, 'message_id') else None,
+                            Comp.Image.fromBase64(method_data)
+                        ]
+                        msg_chain = [c for c in msg_chain if c is not None]
+                        await event.send(MessageChain(chain=msg_chain))
+                        self._log(f"图片发送成功 (方法: base64)")
+                        return True, "base64"
+
+                    elif method_name == "url":
+                        await self._safe_reply(event, f"🎨 图片链接:\n{method_data}")
+                        self._log(f"图片发送成功 (方法: URL, {method_data})")
+                        return True, "URL"
+
+                except Exception as e:
+                    last_err = e
+                    if attempt < max_retries:
+                        interval = self.retry_interval if self.retry_enabled else 0.5
+                        self._log(f"{method_name} 发送第 {attempt} 次失败，{max_retries - attempt} 次后重试: {e}")
+                        await asyncio.sleep(interval)
+                    else:
+                        self._log(f"{method_name} 发送重试 {max_retries} 次均失败: {e}")
+
+        # 所有方法都失败，记录可用URL便于排查
+        if image_url:
+            self._log(f"所有发送方法均失败，可用URL: {image_url}")
+        return False, str(last_err) if last_err else "未知错误"
 
     async def _save_image(self, image_data: bytes, prompt: str) -> Optional[str]:
         if not self.save_images:
             return None
-        
+
         try:
             import re
             clean_prompt = re.sub(r'[\\/*?:"<>|]', '', prompt[:50])
             timestamp = asyncio.get_event_loop().time()
-            filename = f"{clean_prompt}_{int(timestamp)}.jpg"
+
+            # 检测实际图片格式
+            ext = self._detect_image_format(image_data)
+            filename = f"{clean_prompt}_{int(timestamp)}.{ext}"
             save_path = self.save_dir / filename
+
             with open(save_path, 'wb') as f:
                 f.write(image_data)
+            logger.info(f"[ImageProducer] 图片已保存: {save_path} (格式: {ext}, 大小: {len(image_data)} bytes)")
             return str(save_path)
         except Exception as e:
             logger.error(f"[ImageProducer] 保存图片失败: {e}", exc_info=True)
             return None
 
-    async def _save_image_to_ai_images(self, image_data: bytes, prompt: str) -> Optional[str]:
-        """保存图片到 ai_images 目录"""
+    async def _save_image_to_ai_images(self, image_data: bytes, prompt: str, compress: bool = False) -> Optional[str]:
+        """保存图片到 ai_images 目录
+
+        Args:
+            image_data: 图片数据
+            prompt: 提示词（用于文件名）
+            compress: 是否压缩图片（默认 False，保持原始质量）
+        """
         try:
             import re
             clean_prompt = re.sub(r'[\\/*?:"<>|]', '', prompt[:50])
             timestamp = asyncio.get_event_loop().time()
-            filename = f"{clean_prompt}_{int(timestamp)}.jpg"
+
+            # 检测实际图片格式
+            ext = self._detect_image_format(image_data)
+
+            # 仅在显式要求时压缩
+            if compress:
+                image_data = self._compress_image(image_data, max_size_kb=1024)
+                ext = 'jpg'
+
+            filename = f"{clean_prompt}_{int(timestamp)}.{ext}"
             save_path = self.ai_images_dir / filename
+
             with open(save_path, 'wb') as f:
                 f.write(image_data)
+            self._log(f"图片已保存到 ai_images: {save_path} (格式: {ext}, 大小: {len(image_data)} bytes)")
             return str(save_path)
         except Exception as e:
             logger.error(f"[ImageProducer] 保存图片到 ai_images 失败: {e}", exc_info=True)
+            self.file_logger.error(f"保存图片到 ai_images 失败: {e}")
             return None
+
+    async def _download_with_retry(self, url: str, prompt: str, max_retries: int = 2) -> Optional[str]:
+        """下载图片并保存，带重试机制"""
+        for attempt in range(1, max_retries + 1):
+            try:
+                if not self.session:
+                    return None
+                async with self.session.get(url) as response:
+                    if response.status == 200:
+                        image_data = await response.read()
+                        # 图片完整性验证：至少 1KB 且能识别为图片
+                        if len(image_data) < 1024:
+                            self._log(f"下载的图片过小 ({len(image_data)} bytes)，可能不完整")
+                            if attempt < max_retries:
+                                await asyncio.sleep(1)
+                                continue
+                            return None
+                        return await self._save_image_to_ai_images(image_data, prompt)
+                    else:
+                        self._log(f"下载图片失败，状态码: {response.status} (第{attempt}次)")
+                        if attempt < max_retries:
+                            await asyncio.sleep(1)
+            except Exception as e:
+                self._log(f"下载图片异常 (第{attempt}次): {e}")
+                if attempt < max_retries:
+                    await asyncio.sleep(1)
+        return None
+
+    async def _extract_and_save_image(self, result, prompt: str, task_id: str, event=None) -> dict:
+        """
+        统一提取 API 返回的图片数据并保存到本地
+        
+        备用方案链（按优先级）：
+        1. image_data（直接二进制数据）
+        2. b64_json 中的 HTTP URL（markdown格式）→ 下载
+        3. b64_json 中的 data URI → 解码保存
+        4. b64_json 纯 base64 → 解码保存
+        5. image_url → 下载（带重试）
+        
+        Args:
+            result: ImageResult 对象
+            prompt: 提示词
+            task_id: 任务 ID
+            event: 事件对象（用于发送消息提示）
+        
+        Returns:
+            {
+                "save_path": str | None,
+                "image_b64_data": str | None,
+                "image_url": str | None,
+                "download_success": bool,
+                "source": str  # 数据来源类型
+            }
+        """
+        import re
+        
+        info = {
+            "save_path": None,
+            "image_b64_data": None,
+            "image_url": None,
+            "download_success": False,
+            "source": "unknown",
+        }
+        
+        if not result or not result.success:
+            return info
+        
+        # 记录原始 URL（如果有的话）
+        if result.image_url:
+            info["image_url"] = result.image_url
+        
+        # === 方案1: image_data（直接二进制数据）===
+        if result.image_data:
+            self._log(f"[{task_id}] 方案1: 使用 image_data, 大小={len(result.image_data)} bytes")
+            save_path = await self._save_image_to_ai_images(result.image_data, prompt)
+            if save_path:
+                info["save_path"] = save_path
+                info["image_b64_data"] = base64.b64encode(result.image_data).decode('utf-8')
+                info["download_success"] = True
+                info["source"] = "image_data"
+                self._log(f"[{task_id}] 图片已保存: {save_path}")
+                return info
+            self._log(f"[{task_id}] 方案1保存失败，尝试备用方案...")
+        
+        # === 方案2: b64_json 中的 HTTP URL ===
+        if result.b64_json:
+            b64_content = result.b64_json.strip()
+            md_match = re.search(r'!\[.*?\]\((https?://[^\s)]+)\)', b64_content)
+            data_uri_match = re.search(r'!\[.*?\]\(data:image/([a-zA-Z]+);base64,([A-Za-z0-9+/=]+)\)', b64_content)
+            
+            if md_match:
+                image_url = md_match.group(1)
+                info["image_url"] = image_url
+                self._log(f"[{task_id}] 方案2: 检测到 Markdown 图片链接: {image_url}")
+                save_path = await self._download_with_retry(image_url, prompt, max_retries=2)
+                if save_path:
+                    info["save_path"] = save_path
+                    info["download_success"] = True
+                    info["source"] = "markdown_url"
+                    try:
+                        with open(save_path, 'rb') as f:
+                            info["image_b64_data"] = base64.b64encode(f.read()).decode('utf-8')
+                    except Exception:
+                        pass
+                    self._log(f"[{task_id}] 图片已下载: {save_path}")
+                    return info
+                self._log(f"[{task_id}] 方案2下载失败，尝试备用方案...")
+            
+            # === 方案3: b64_json 中的 data URI ===
+            if data_uri_match:
+                img_format = data_uri_match.group(1).lower()
+                b64_data = data_uri_match.group(2)
+                self._log(f"[{task_id}] 方案3: 检测到 data URI, 格式={img_format}, base64长度={len(b64_data)}")
+                try:
+                    image_bytes = base64.b64decode(b64_data)
+                    save_path = await self._save_image_to_ai_images(image_bytes, prompt)
+                    if save_path:
+                        info["save_path"] = save_path
+                        info["image_b64_data"] = b64_data
+                        info["download_success"] = True
+                        info["source"] = "data_uri"
+                        self._log(f"[{task_id}] data URI图片已保存: {save_path}")
+                        return info
+                except Exception as decode_err:
+                    self._log(f"[{task_id}] 方案3解码失败: {decode_err}")
+            
+            # === 方案4: 纯 base64 数据 ===
+            if not md_match and not data_uri_match:
+                # 面板日志缩略显示，本地保存全量数据
+                b64_preview = b64_content[:50] + "..." if len(b64_content) > 50 else b64_content
+                self._log(f"[{task_id}] 方案4: 使用纯 base64 数据, 长度={len(b64_content)}, 预览: {b64_preview}")
+                try:
+                    image_bytes = base64.b64decode(b64_content)
+                    save_path = await self._save_image_to_ai_images(image_bytes, prompt)
+                    if save_path:
+                        info["save_path"] = save_path
+                        # 保存全量 base64 数据（用于后续发送）
+                        info["image_b64_data"] = b64_content
+                        info["download_success"] = True
+                        info["source"] = "pure_base64"
+                        self._log(f"[{task_id}] base64图片已保存: {save_path}", panel=True)
+                        return info
+                except Exception as decode_err:
+                    self._log(f"[{task_id}] 方案4解码失败: {decode_err}")
+        
+        # === 方案5: image_url 直接下载（带重试）===
+        if result.image_url:
+            self._log(f"[{task_id}] 方案5: 使用 image_url 下载: {result.image_url}")
+            save_path = await self._download_with_retry(result.image_url, prompt, max_retries=2)
+            if save_path:
+                info["save_path"] = save_path
+                info["download_success"] = True
+                info["source"] = "image_url_download"
+                try:
+                    with open(save_path, 'rb') as f:
+                        info["image_b64_data"] = base64.b64encode(f.read()).decode('utf-8')
+                except Exception:
+                    pass
+                self._log(f"[{task_id}] 图片已下载: {save_path}")
+                return info
+            
+            # 下载失败殿后：记录 URL 并发送消息提示
+            self._log(f"[{task_id}] 方案5下载失败，保留 URL 作为殿后")
+            info["source"] = "url_fallback"
+            # 发送下载失败提示
+            if event:
+                await self._safe_reply(event, f"喵...图片下载失败喵\n请手动访问链接查看:\n{result.image_url}")
+        
+        # === 方案6: 检查 b64_json 是否可能是 URL（误识别的情况）===
+        # 如果 b64_json 内容看起来像 URL 但下载失败，尝试作为纯文本解码
+        if result.b64_json and not info["download_success"]:
+            b64_content = result.b64_json.strip()
+            # 检查是否可能是长文本（非 URL）
+            if len(b64_content) > 1000 and not b64_content.startswith("http"):
+                self._log(f"[{task_id}] 方案6: 尝试将长文本内容作为 base64 解码")
+                try:
+                    image_bytes = base64.b64decode(b64_content)
+                    save_path = await self._save_image_to_ai_images(image_bytes, prompt)
+                    if save_path:
+                        info["save_path"] = save_path
+                        info["image_b64_data"] = b64_content
+                        info["download_success"] = True
+                        info["source"] = "fallback_base64"
+                        self._log(f"[{task_id}] 殿后解码成功: {save_path}")
+                        return info
+                except Exception as decode_err:
+                    self._log(f"[{task_id}] 方案6解码失败: {decode_err}")
+        
+        # 所有方案都失败
+        self._log(f"[{task_id}] 所有提取方案均失败")
+        
+        # 最终殿后：如果有 URL 或 base64 数据，记录并提示
+        if result.image_url:
+            info["source"] = "url_only"
+            self._log(f"[{task_id}] 保留 URL: {result.image_url}")
+        elif result.b64_json:
+            info["source"] = "b64_only"
+            self._log(f"[{task_id}] 保留 base64 数据，长度: {len(result.b64_json)}")
+        
+        return info
 
     async def _download_and_save_to_ai_images(self, url: str, prompt: str) -> Optional[str]:
-        """下载图片并保存到 ai_images 目录"""
-        try:
-            if not self.session:
-                return None
-            async with self.session.get(url) as response:
-                if response.status == 200:
-                    image_data = await response.read()
-                    return await self._save_image_to_ai_images(image_data, prompt)
-                else:
-                    logger.warning(f"[ImageProducer] 下载图片失败，状态码: {response.status}")
-                    return None
-        except Exception as e:
-            logger.error(f"[ImageProducer] 下载并保存图片失败: {e}", exc_info=True)
-            return None
+        """下载图片并保存到 ai_images 目录（保留兼容）"""
+        return await self._download_with_retry(url, prompt, max_retries=1)
 
-    @filter.command("img列表", alias={"图片列表", "预设列表"})
-    async def list_presets_command(self, event: AstrMessageEvent):
+    @filter.command("img预设", alias={"图片预设", "预设", "img列表", "img查看"})
+    async def preset_command(self, event: AstrMessageEvent):
+        """查看预设提示词（不带参数显示列表，带参数显示详情）"""
         if not self.is_group_allowed(event):
-            await self._safe_reply(event, "❌ 当前群组不在白名单中，无法使用此功能")
+            await self._safe_reply(event, "喵...当前群组不在白名单中，小猫咪无法为你服务喵～")
             return
 
         if not self.is_user_allowed(event):
-            await self._safe_reply(event, "❌ 当前用户不在白名单中，无法使用此功能")
-            return
-
-        if not self.preset_prompt_dict:
-            await self._safe_reply(event, "📋 暂无预设提示词")
-            return
-
-        presets_list = "\n".join([f"• {trigger}" for trigger in self.preset_prompt_dict.keys()])
-        await self._safe_reply(event, f"📋 可用预设触发词:\n{presets_list}\n\n💡 使用方法: /img <触发词> <描述>")
-
-    @filter.command("img查看", alias={"图片查看", "预设查看"})
-    async def view_preset_command(self, event: AstrMessageEvent):
-        if not self.is_group_allowed(event):
-            await self._safe_reply(event, "❌ 当前群组不在白名单中，无法使用此功能")
-            return
-
-        if not self.is_user_allowed(event):
-            await self._safe_reply(event, "❌ 当前用户不在白名单中，无法使用此功能")
+            await self._safe_reply(event, "喵...当前用户不在白名单中，小猫咪无法为你服务喵～")
             return
 
         text = self._get_message_text(event)
-        text = text.replace('/img查看', '').replace('/图片查看', '').replace('/预设查看', '').strip()
+        # 移除所有可能的命令前缀
+        for prefix in ['/img预设', '/图片预设', '/预设', '/img列表', '/img查看']:
+            text = text.replace(prefix, '')
+        text = text.strip()
 
-        if not text:
-            await self._safe_reply(event, "💡 请指定要查看的预设触发词\n示例: /img查看 手办化")
+        if not self.preset_prompt_dict:
+            await self._safe_reply(event, "喵～暂无预设提示词喵")
             return
 
+        # 不带参数：显示列表
+        if not text:
+            presets_list = "\n".join([f"• {trigger}" for trigger in self.preset_prompt_dict.keys()])
+            await self._safe_reply(event, f"喵～可用预设触发词喵:\n{presets_list}\n\n小猫咪提示: /img预设 [名称] 查看详情喵")
+            return
+
+        # 带参数：显示详情
         preset_prompt = self.preset_prompt_dict.get(text)
         if preset_prompt:
-            await self._safe_reply(event, f"📝 预设「{text}」的内容:\n{preset_prompt}")
+            await self._safe_reply(event, f"喵～预设「{text}」的内容喵:\n{preset_prompt}")
         else:
-            await self._safe_reply(event, f"❌ 未找到预设触发词: {text}")
+            await self._safe_reply(event, f"喵...未找到预设触发词喵: {text}")
+
+    @filter.command("img帮助", alias={"imgh", "aimg帮助"})
+    async def img_help_command(self, event: AstrMessageEvent):
+        """显示帮助信息"""
+        await self._handle_img_subcommand(event, "帮助")
+
+    @filter.command("img设置", alias={"imgconfig", "aimg设置"})
+    async def img_config_command(self, event: AstrMessageEvent):
+        """查看当前配置"""
+        await self._handle_img_subcommand(event, "设置")
+
+    @filter.command("img平台", alias={"imgp", "aimg平台"})
+    async def img_platform_command(self, event: AstrMessageEvent):
+        """查看平台状态"""
+        await self._handle_img_subcommand(event, "平台")
+
+    @filter.command("生图列表", alias={"ai生图列表", "任务队列"})
+    async def shengtu_list_command(self, event: AstrMessageEvent):
+        """查看当前任务队列"""
+        if not self.is_group_allowed(event):
+            await self._safe_reply(event, "喵...当前群组不在白名单中，小猫咪无法为你服务喵～")
+            return
+        if not self.is_user_allowed(event):
+            await self._safe_reply(event, "喵...当前用户不在白名单中，小猫咪无法为你服务喵～")
+            return
+        
+        if not self.running_tasks:
+            await self._safe_reply(event, "喵～当前没有正在运行的任务喵")
+            return
+        
+        task_list = []
+        for task_id, task in self.running_tasks.items():
+            status = "运行中" if not task.done() else "已完成"
+            task_list.append(f"• {task_id}: {status}")
+        
+        await self._safe_reply(event, f"喵～当前任务队列喵:\n" + "\n".join(task_list))
