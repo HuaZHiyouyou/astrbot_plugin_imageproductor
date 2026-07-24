@@ -93,7 +93,9 @@ class GeminiProvider(BaseProvider):
             model = model or self.config.get("model", "gemini-2.0-flash-preview-image")
             width, height = self._parse_size(size)
 
-            url = f"{api_url}/{model}:generateContent"
+            url = self._build_url(api_url, f"/{model}:generateContent")
+            from astrbot.api import logger
+            logger.info(f"[ImageProducer] Gemini 图像生成 API: {url}, model: {model}")
 
             headers = {
                 "Content-Type": "application/json",
@@ -147,7 +149,9 @@ class GeminiProvider(BaseProvider):
             if not api_key:
                 return False, "API Key 未配置"
 
-            url = f"{api_url}/v1beta/models"
+            url = self._build_url(api_url, "/v1beta/models")
+            from astrbot.api import logger
+            logger.info(f"[ImageProducer] Gemini 测试連接 API: {url}")
             headers = {
                 "Authorization": f"Bearer {api_key}",
             }

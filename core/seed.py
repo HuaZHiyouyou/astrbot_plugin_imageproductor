@@ -66,11 +66,12 @@ class SeedProvider(BaseProvider):
             is_multimodal = self._is_multimodal_model(gen_model)
 
             width, height = self._parse_size(size)
-            url = f"{api_url}/v1/images/generations"
+            url = self._build_url(api_url, "/v1/images/generations")
             headers = {
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json"
             }
+            logger.info(f"[ImageProducer] Seed 图像生成 API: {url}, model: {gen_model}")
 
             if is_multimodal and has_images:
                 # 多模态模型：直接传入图片+文字
@@ -137,10 +138,11 @@ class SeedProvider(BaseProvider):
             if not api_key:
                 return False, "API Key 未配置"
 
-            url = f"{api_url}/v1/models"
+            url = self._build_url(api_url, "/v1/models")
             headers = {
                 "Authorization": f"Bearer {api_key}",
             }
+            logger.info(f"[ImageProducer] Seed 测试连接 API: {url}")
 
             async with self.session.get(url, headers=headers) as response:
                 if response.status == 200:

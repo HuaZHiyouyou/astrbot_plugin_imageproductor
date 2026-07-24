@@ -260,6 +260,102 @@ Please describe the visual characteristics of the reference image(s) in detail i
             api_url = self.config.get("main_api_url", "")
         return api_key, api_url
 
+    def _build_url(self, base_url: str, path: str) -> str:
+        """构建URL，自动处理末尾斜杠
+
+        Args:
+            base_url: 基础URL（如 https://api.example.com/）
+            path: 路径（如 /v1/images/generations）
+
+        Returns:
+            str: 完整的URL
+        """
+        # 移除 base_url 末尾的斜杠
+        base_url = base_url.rstrip('/')
+        # 确保 path 以斜杠开头
+        if not path.startswith('/'):
+            path = '/' + path
+        return f"{base_url}{path}"
+
+    def _is_likely_base64(self, content: str) -> bool:
+        """检测内容是否可能是 base64 编码的图片数据
+        
+        多重特征检测：
+        1. 字符集检测：base64 字符（A-Za-z0-9+/=）占比
+        2. 长度验证：长度是 4 的倍数，或以 = 结尾
+        3. 解码测试：尝试解码前 100 个字符
+        4. Magic Number：解码后检查图片文件头
+        
+        Args:
+            content: 待检测的内容
+            
+        Returns:
+            bool: 是否可能是 base64 图片数据
+        """
+        import base64
+        
+        if not content or len(content) < 100:
+            return False
+        
+        # 移除可能的空白字符
+        clean_content = content.replace('\n', '').replace('\r', '').replace(' ', '')
+        
+        # 特征1: 计算 base64 字符比例
+        base64_chars = set('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=')
+        base64_ratio = sum(1 for c in clean_content if c in base64_chars) / len(clean_content)
+        
+        # 特征2: 检查长度是否是 4 的倍数（标准 base64）
+        is_valid_length = len(clean_content) % 4 == 0 or clean_content.endswith('=')
+        
+        # 特征3: 尝试解码前 100 个字符
+        can_decode = False
+        has_image_header = False
+        try:
+            test_data = clean_content[:100] if len(clean_content) >= 100 else clean_content
+            # 补齐 padding
+            padding = 4 - (len(test_data) % 4)
+            if padding != 4:
+                test_data += '=' * padding
+            decoded = base64.b64decode(test_data)
+            can_decode = True
+            
+            # 特征4: 检查 magic number（图片文件头）
+            if len(decoded) >= 8:
+                # PNG: 89 50 4E 47 0D 0A 1A 0A
+                if decoded[:8] == b'\x89PNG\r\n\x1a\n':
+                    has_image_header = True
+                # JPEG: FF D8 FF
+                elif decoded[:3] == b'\xff\xd8\xff':
+                    has_image_header = True
+                # GIF: GIF87a or GIF89a
+                elif decoded[:6] in (b'GIF87a', b'GIF89a'):
+                    has_image_header = True
+                # WebP: RIFF....WEBP
+                elif decoded[:4] == b'RIFF' and decoded[8:12] == b'WEBP':
+                    has_image_header = True
+                # BMP: BM
+                elif decoded[:2] == b'BM':
+                    has_image_header = True
+        except Exception:
+            pass
+        
+        # 综合判断：
+        # 1. 90%+ 是 base64 字符 + 长度是 4 的倍数
+        # 2. 95%+ 是 base64 字符
+        # 3. 可解码 + 有图片 magic number
+        # 4. 长度 > 10000 + 80%+ 是 base64 字符（长数据放宽条件）
+        
+        if base64_ratio >= 0.90 and is_valid_length:
+            return True
+        if base64_ratio >= 0.95:
+            return True
+        if can_decode and has_image_header:
+            return True
+        if len(clean_content) > 10000 and base64_ratio >= 0.80:
+            return True
+            
+        return False
+
     def _rotate_api_key(self):
         """轮询到下一个API Key"""
         api_keys = self.config.get("main_api_keys", [])

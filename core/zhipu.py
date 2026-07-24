@@ -102,7 +102,7 @@ class ZhipuProvider(BaseProvider):
             "max_tokens": 2000
         }
 
-        url = f"{api_url}/chat/completions"
+        url = self._build_url(api_url, "/chat/completions")
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
@@ -118,6 +118,15 @@ class ZhipuProvider(BaseProvider):
                 if "choices" in result and len(result["choices"]) > 0:
                     content = result["choices"][0]["message"]["content"]
 
+                    # 检查是否是 data URI 格式（markdown 或纯 data URI）
+                    if "data:image/" in content:
+                        data_uri_match = re.search(r'data:image/[^;]+;base64,([A-Za-z0-9+/=\s]+)', content)
+                        if data_uri_match:
+                            b64_data = data_uri_match.group(1).replace('\n', '').replace(' ', '')
+                            logger.info(f"[ImageProducer] 智谱Chat返回 data URI 格式，base64 长度: {len(b64_data)}")
+                            return ImageResult(success=True, b64_json=b64_data)
+
+                    # 检查是否是 markdown 图片格式
                     match = re.search(r"!\[.*?\]\((.*?)\)", content)
                     if match:
                         img_src = match.group(1)
@@ -128,6 +137,55 @@ class ZhipuProvider(BaseProvider):
                         else:
                             logger.info(f"[ImageProducer] 从Chat响应获取到URL图片: {img_src[:50]}...")
                             return ImageResult(success=True, image_url=img_src)
+
+                    # 检查是否是纯 URL
+                    if content.strip().startswith("http://") or content.strip().startswith("https://"):
+                        logger.info(f"[ImageProducer] 智谱Chat返回 URL: {content[:100]}")
+                        return ImageResult(success=True, image_url=content.strip())
+
+                    # 检查是否是纯 base64 数据（多重特征检测）
+                    content_clean = content.strip().replace('\n', '').replace('\r', '').replace(' ', '')
+                    
+                    if len(content_clean) > 100:
+                        # 特征1: 字符集检测
+                        base64_chars = set('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=')
+                        non_base64_count = sum(1 for c in content_clean if c not in base64_chars)
+                        base64_ratio = 1 - (non_base64_count / len(content_clean))
+                        
+                        # 特征2: 长度是4的倍数（或用=填充）
+                        is_valid_length = (len(content_clean) % 4 == 0) or content_clean.endswith('=') or content_clean.endswith('==')
+                        
+                        # 特征3: 尝试解码前100个字符验证
+                        can_decode = False
+                        try:
+                            test_decode = base64.b64decode(content_clean[:100] if len(content_clean) >= 100 else content_clean)
+                            can_decode = len(test_decode) > 0
+                        except:
+                            pass
+                        
+                        # 特征4: 检查是否有图片 magic number（解码后）
+                        has_image_magic = False
+                        try:
+                            if can_decode and len(content_clean) >= 20:
+                                sample_decode = base64.b64decode(content_clean[:100])
+                                if sample_decode[:4] == b'\x89PNG' or sample_decode[:3] == b'\xff\xd8\xff':
+                                    has_image_magic = True
+                                elif sample_decode[:4] == b'GIF8' or sample_decode[:4] == b'RIFF':
+                                    has_image_magic = True
+                        except:
+                            pass
+                        
+                        # 综合判断
+                        is_base64 = (
+                            (base64_ratio > 0.9 and is_valid_length) or
+                            (base64_ratio > 0.95) or
+                            (can_decode and has_image_magic) or
+                            (len(content_clean) > 10000 and base64_ratio > 0.8)
+                        )
+                        
+                        if is_base64:
+                            logger.info(f"[ImageProducer] 智谱Chat返回纯 base64 数据，长度: {len(content_clean)}, base64比例: {base64_ratio:.2%}")
+                            return ImageResult(success=True, b64_json=content_clean)
 
                     logger.warning(f"[ImageProducer] 智谱Chat未返回图片，返回内容: {content[:500]}")
                     return ImageResult(success=False, error=f"智谱Chat未返回图片，内容: {content[:200]}")
@@ -151,7 +209,7 @@ class ZhipuProvider(BaseProvider):
         try:
             logger.info(f"[ImageProducer] 智谱开始分析 {len(image_b64_list)} 张参考图片")
 
-            url = f"{api_url}/chat/completions"
+            url = self._build_url(api_url, "/chat/completions")
             headers = {
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json"
@@ -256,7 +314,7 @@ Please return in the following format (only return the prompt, no other content)
             # 多模态模型：使用 Chat API 传入图片+文字
             logger.info(f"[ImageProducer] 检测到多模态模型 {model}，使用 Chat API 传入 {len(image_b64_list)} 张图片")
             
-            url = f"{api_url}/chat/completions"
+            url = self._build_url(api_url, "/chat/completions")
             
             content_parts = []
             for i, (mime, b64_data) in enumerate(image_b64_list, start=1):
@@ -285,7 +343,7 @@ Please return in the following format (only return the prompt, no other content)
             }
         else:
             # 传统文生图模型：使用 /images/generations 端点
-            url = f"{api_url}/images/generations"
+            url = self._build_url(api_url, "/images/generations")
             payload = {
                 "model": model,
                 "prompt": prompt,
@@ -397,7 +455,7 @@ Please return in the following format (only return the prompt, no other content)
             if not api_key:
                 return False, "API Key 未配置"
 
-            url = f"{api_url}/models"
+            url = self._build_url(api_url, "/models")
             headers = {
                 "Authorization": f"Bearer {api_key}",
             }

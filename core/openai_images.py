@@ -7,6 +7,7 @@ OpenAI 图像生成 Provider (整合普通生成和Chat模式)
 """
 
 import re
+import base64
 from typing import Tuple, List
 
 from .base import BaseProvider, ImageResult
@@ -110,13 +111,13 @@ class OpenAIProvider(BaseProvider):
             "max_tokens": 2000
         }
 
-        url = f"{api_url}/chat/completions"
+        url = self._build_url(api_url, "/chat/completions")
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
 
-        logger.info(f"[ImageProducer] 正在调用OpenAI Chat API...")
+        logger.info(f"[ImageProducer] 正在调用OpenAI Chat API: {url}")
 
         async with self.session.post(url, headers=headers, json=payload) as response:
             if response.status == 200:
@@ -156,7 +157,7 @@ class OpenAIProvider(BaseProvider):
     ) -> str:
         """使用 GPT-4o Vision 分析参考图片，生成详细提示词"""
         try:
-            url = f"{api_url}/chat/completions"
+            url = self._build_url(api_url, "/chat/completions")
             headers = {
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json"
@@ -259,7 +260,7 @@ Only return the final prompt text, nothing else."""
             from astrbot.api import logger
             logger.info(f"[ImageProducer] 检测到多模态模型 {model}，使用 Chat API 传入 {len(image_b64_list)} 张图片")
             
-            url = f"{api_url}/chat/completions"
+            url = self._build_url(api_url, "/chat/completions")
             
             content_parts = []
             for i, (mime, b64_data) in enumerate(image_b64_list, start=1):
@@ -288,7 +289,7 @@ Only return the final prompt text, nothing else."""
             }
         else:
             # 传统文生图模型：使用 /images/generations 端点
-            url = f"{api_url}/images/generations"
+            url = self._build_url(api_url, "/images/generations")
             payload = {
                 "model": model,
                 "prompt": prompt,
@@ -320,7 +321,80 @@ Only return the final prompt text, nothing else."""
                     message = result["choices"][0].get("message", {})
                     content = message.get("content", "")
                     if content:
-                        return ImageResult(success=True, b64_json=content)
+                        # 检查是否是 data URI 格式（markdown 或纯 data URI）
+                        if "data:image/" in content:
+                            # 提取 data URI 中的 base64 数据
+                            data_uri_match = re.search(r'data:image/[^;]+;base64,([A-Za-z0-9+/=\s]+)', content)
+                            if data_uri_match:
+                                b64_data = data_uri_match.group(1).replace('\n', '').replace(' ', '')
+                                logger.info(f"[ImageProducer] Chat API 返回 data URI 格式，base64 长度: {len(b64_data)}")
+                                return ImageResult(success=True, b64_json=b64_data)
+                        
+                        # 检查是否是 markdown 图片格式
+                        md_match = re.search(r'!\[.*?\]\((https?://[^\s)]+)\)', content)
+                        if md_match:
+                            image_url = md_match.group(1)
+                            logger.info(f"[ImageProducer] Chat API 返回 markdown 图片: {image_url}")
+                            return ImageResult(success=True, image_url=image_url)
+                        
+                        # 检查是否是纯 URL
+                        if content.strip().startswith("http://") or content.strip().startswith("https://"):
+                            logger.info(f"[ImageProducer] Chat API 返回 URL: {content[:100]}")
+                            return ImageResult(success=True, image_url=content.strip())
+                        
+                        # 检查是否是纯 base64 数据（多重特征检测）
+                        content_clean = content.strip().replace('\n', '').replace('\r', '').replace(' ', '')
+                        
+                        if len(content_clean) > 100:
+                            # 特征1: 字符集检测
+                            base64_chars = set('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=')
+                            non_base64_count = sum(1 for c in content_clean if c not in base64_chars)
+                            base64_ratio = 1 - (non_base64_count / len(content_clean))
+                            
+                            # 特征2: 长度是4的倍数（或用=填充）
+                            is_valid_length = (len(content_clean) % 4 == 0) or content_clean.endswith('=') or content_clean.endswith('==')
+                            
+                            # 特征3: 尝试解码前100个字符验证
+                            can_decode = False
+                            try:
+                                test_decode = base64.b64decode(content_clean[:100] if len(content_clean) >= 100 else content_clean)
+                                can_decode = len(test_decode) > 0
+                            except:
+                                pass
+                            
+                            # 特征4: 检查是否有图片 magic number（解码后）
+                            has_image_magic = False
+                            try:
+                                if can_decode and len(content_clean) >= 20:
+                                    sample_decode = base64.b64decode(content_clean[:100])
+                                    # PNG: 89 50 4E 47, JPEG: FF D8 FF, GIF: 47 49 46, WebP: 52 49 46 46
+                                    if sample_decode[:4] == b'\x89PNG' or sample_decode[:3] == b'\xff\xd8\xff':
+                                        has_image_magic = True
+                                    elif sample_decode[:4] == b'GIF8' or sample_decode[:4] == b'RIFF':
+                                        has_image_magic = True
+                            except:
+                                pass
+                            
+                            # 综合判断：满足以下任一条件即认为是 base64
+                            # 1. 90%以上是base64字符 + 长度是4的倍数
+                            # 2. 95%以上是base64字符
+                            # 3. 可以解码 + 有图片magic number
+                            # 4. 长度 > 10000（大概率是图片数据）
+                            
+                            is_base64 = (
+                                (base64_ratio > 0.9 and is_valid_length) or
+                                (base64_ratio > 0.95) or
+                                (can_decode and has_image_magic) or
+                                (len(content_clean) > 10000 and base64_ratio > 0.8)
+                            )
+                            
+                            if is_base64:
+                                logger.info(f"[ImageProducer] Chat API 返回纯 base64 数据，长度: {len(content_clean)}, base64比例: {base64_ratio:.2%}, 可解码: {can_decode}, 图片特征: {has_image_magic}")
+                                return ImageResult(success=True, b64_json=content_clean)
+                        
+                        # 其他情况，记录并返回错误
+                        logger.warning(f"[ImageProducer] Chat API 返回未知格式内容，长度: {len(content)}, 预览: {content[:100]}")
+                        return ImageResult(success=False, error=f"Chat API 返回未知格式内容，长度: {len(content)}")
                 
                 # Images API 返回格式
                 if "data" in result and len(result["data"]) > 0:
@@ -418,10 +492,11 @@ Only return the final prompt text, nothing else."""
             if not api_key:
                 return False, "API Key 未配置"
 
-            url = f"{api_url}/models"
+            url = self._build_url(api_url, "/models")
             headers = {
                 "Authorization": f"Bearer {api_key}",
             }
+            logger.info(f"[ImageProducer] OpenAI 测试連接 API: {url}")
 
             async with self.session.get(url, headers=headers) as response:
                 if response.status == 200:

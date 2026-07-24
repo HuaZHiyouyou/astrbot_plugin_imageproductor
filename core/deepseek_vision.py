@@ -134,6 +134,11 @@ class DeepSeekVisionProvider(BaseProvider):
                             else:
                                 return ImageResult(success=True, image_url=img_src)
 
+                        # 未匹配到 markdown 格式，检查是否是纯 base64 数据
+                        if self._is_likely_base64(content):
+                            logger.info(f"[ImageProducer] DeepSeek Vision 返回纯 base64 数据，长度: {len(content)}")
+                            return ImageResult(success=True, b64_json=content)
+
                         return ImageResult(success=False, error=f"DeepSeek Vision未返回图片")
                 else:
                     error_text = await response.text()

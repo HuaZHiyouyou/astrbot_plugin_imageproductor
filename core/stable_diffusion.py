@@ -80,7 +80,7 @@ class StableDiffusionProvider(BaseProvider):
         kwargs: dict
     ) -> ImageResult:
         """纯文字生成图像 (txt2img)"""
-        url = f"{api_url}/sdapi/v1/txt2img"
+        url = self._build_url(api_url, "/sdapi/v1/txt2img")
 
         payload = {
             "prompt": prompt,
@@ -123,7 +123,7 @@ class StableDiffusionProvider(BaseProvider):
         kwargs: dict
     ) -> ImageResult:
         """以图生图 (img2img)"""
-        url = f"{api_url}/sdapi/v1/img2img"
+        url = self._build_url(api_url, "/sdapi/v1/img2img")
 
         mime, b64_data = image_b64_list[0]
 
@@ -170,7 +170,7 @@ class StableDiffusionProvider(BaseProvider):
         try:
             api_key, api_url = self._get_api_config()
 
-            url = f"{api_url}/sdapi/v1/options"
+            url = self._build_url(api_url, "/sdapi/v1/options")
             headers = {"Content-Type": "application/json"}
 
             if api_key:

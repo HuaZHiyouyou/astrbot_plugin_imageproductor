@@ -100,13 +100,13 @@ class BaiduProvider(BaseProvider):
             "max_tokens": 2000
         }
 
-        url = f"{api_url}/chat/completions"
+        url = self._build_url(api_url, "/chat/completions")
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
 
-        logger.info(f"[ImageProducer] 正在调用百度 Chat API...")
+        logger.info(f"[ImageProducer] 正在调用百度 Chat API: {url}, model: {model}")
 
         async with self.session.post(url, headers=headers, json=payload) as response:
             if response.status == 200:
@@ -127,6 +127,11 @@ class BaiduProvider(BaseProvider):
                             logger.info(f"[ImageProducer] 从百度Chat响应获取到URL图片")
                             return ImageResult(success=True, image_url=img_src)
 
+                    # 未匹配到 markdown 格式，检查是否是纯 base64 数据
+                    if self._is_likely_base64(content):
+                        logger.info(f"[ImageProducer] 百度 Chat API 返回纯 base64 数据，长度: {len(content)}")
+                        return ImageResult(success=True, b64_json=content)
+
                     logger.warning(f"[ImageProducer] 百度Chat未返回图片")
                     return ImageResult(success=False, error=f"百度Chat未返回图片")
 
@@ -146,10 +151,11 @@ class BaiduProvider(BaseProvider):
     ) -> str:
         """使用百度 ERNIE-VL 分析参考图片，生成详细提示词"""
         try:
-            url = f"{api_url}/rpc/2.0/ai_custom/v1/wenxinworkshop/ernievilg_v/async_gen_images"
+            url = self._build_url(api_url, "/rpc/2.0/ai_custom/v1/wenxinworkshop/ernievilg_v/async_gen_images")
             headers = {
                 "Content-Type": "application/json"
             }
+            logger.info(f"[ImageProducer] 百度分析图片 API: {url}")
 
             image_count = len(image_b64_list)
             first_image = image_b64_list[0]
@@ -229,7 +235,7 @@ Only return the prompt text, nothing else. The prompt should be 150-300 words, d
             # 多模态模型：使用 Chat API 传入图片+文字
             logger.info(f"[ImageProducer] 检测到多模态模型 {model}，使用 Chat API 传入 {len(image_b64_list)} 张图片")
             
-            url = f"{api_url}"
+            url = self._build_url(api_url, "/chat/completions")
             
             content_parts = []
             for i, (mime, b64_data) in enumerate(image_b64_list, start=1):
@@ -259,12 +265,13 @@ Only return the prompt text, nothing else. The prompt should be 150-300 words, d
             }
         else:
             # 传统文生图模型：使用图像生成端点
-            url = f"{api_url}"
+            url = self._build_url(api_url, "/text2image")
             payload = {
                 "access_token": api_key,
                 "text": prompt,
                 "resolution": f"{width}x{height}",
             }
+            logger.info(f"[ImageProducer] 百度文生图 API: {url}, model: {model}")
 
         async with self.session.post(url, headers=headers, json=payload) as response:
             if response.status == 200:
@@ -275,7 +282,13 @@ Only return the prompt text, nothing else. The prompt should be 150-300 words, d
                     message = result["choices"][0].get("message", {})
                     content = message.get("content", "")
                     if content:
-                        return ImageResult(success=True, b64_json=content)
+                        # 检查是否是 base64 数据
+                        if self._is_likely_base64(content):
+                            logger.info(f"[ImageProducer] 百度 Chat API 返回纯 base64 数据，长度: {len(content)}")
+                            return ImageResult(success=True, b64_json=content)
+                        else:
+                            logger.info(f"[ImageProducer] 百度 Chat API 返回文本内容，长度: {len(content)}")
+                            return ImageResult(success=True, image_url=content)
                 
                 # Images API 返回格式
                 if "result" in result:
@@ -366,10 +379,11 @@ Only return the prompt text, nothing else. The prompt should be 150-300 words, d
             if not api_key:
                 return False, "API Key 未配置"
 
-            url = f"{api_url}/models"
+            url = self._build_url(api_url, "/models")
             headers = {
                 "Authorization": f"Bearer {api_key}",
             }
+            logger.info(f"[ImageProducer] 百度测试连接 API: {url}")
 
             async with self.session.get(url, headers=headers) as response:
                 if response.status == 200:

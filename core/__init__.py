@@ -16,6 +16,8 @@ from .claude_vision import ClaudeVisionProvider
 from .deepseek_vision import DeepSeekVisionProvider
 from .volcano_vision import VolcanoVisionProvider
 from .stepfun_vision import StepFunVisionProvider
+from .base64_decoder import Base64Decoder
+from .task_logger import TaskLogger, TaskLoggerManager
 
 __all__ = [
     "BaseProvider",
@@ -34,4 +36,7 @@ __all__ = [
     "DeepSeekVisionProvider",
     "VolcanoVisionProvider",
     "StepFunVisionProvider",
+    "Base64Decoder",
+    "TaskLogger",
+    "TaskLoggerManager",
 ]

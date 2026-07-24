@@ -196,68 +196,30 @@ class ImageProducerGenerateTool(FunctionTool[AstrAgentContext]):
         plugin.running_tasks[task_id] = task
 
         try:
-            result_data = await task
+            # 使用 shield 保护任务不被取消
+            # API 调用一旦开始，必须完成（除非 API 调用本身失败）
+            result_data = await asyncio.shield(task)
             if result_data.get("success", False):
-                import os
-                import astrbot.api.message_components as Comp
-                
-                # 优先使用保存的本地文件路径发送
-                save_path = result_data.get("save_path", "")
-                if save_path and os.path.exists(save_path):
-                    try:
-                        msg_chain: list[BaseMessageComponent] = [
-                            Comp.Reply(id=event.message_obj.message_id) if hasattr(event.message_obj, "message_id") else None,
-                            Comp.Image.fromFileSystem(save_path)
-                        ]
-                        msg_chain = [c for c in msg_chain if c is not None]
-                        await event.send(MessageChain(chain=msg_chain))
-                        logger.info(f"[ImageProducer] 图片发送成功 (路径: {save_path})")
-                    except Exception as e:
-                        logger.error(f"[ImageProducer] 发送本地图片失败: {e}", exc_info=True)
-                        # 发送失败，尝试 base64
-                        if "image_b64" in result_data:
-                            try:
-                                msg_chain = [
-                                    Comp.Reply(id=event.message_obj.message_id) if hasattr(event.message_obj, "message_id") else None,
-                                    Comp.Image.fromBase64(result_data["image_b64"])
-                                ]
-                                msg_chain = [c for c in msg_chain if c is not None]
-                                await event.send(MessageChain(chain=msg_chain))
-                                logger.info("[ImageProducer] 图片发送成功 (base64)")
-                            except Exception as e2:
-                                logger.error(f"[ImageProducer] 发送 base64 图片失败: {e2}")
-                                if "image_url" in result_data:
-                                    await event.send(f"🎨 图片链接:\n{result_data['image_url']}")
-                        elif "image_url" in result_data:
-                            await event.send(f"🎨 图片链接:\n{result_data['image_url']}")
-                elif "image_b64" in result_data:
-                    try:
-                        msg_chain: list[BaseMessageComponent] = [
-                            Comp.Reply(id=event.message_obj.message_id) if hasattr(event.message_obj, "message_id") else None,
-                            Comp.Image.fromBase64(result_data["image_b64"])
-                        ]
-                        msg_chain = [c for c in msg_chain if c is not None]
-                        await event.send(MessageChain(chain=msg_chain))
-                        logger.info("[ImageProducer] 图片发送成功 (base64)")
-                    except Exception as e:
-                        logger.error(f"[ImageProducer] 发送图片失败: {e}", exc_info=True)
-                        if "image_url" in result_data:
-                            await event.send(f"🎨 图片链接:\n{result_data['image_url']}")
-                elif "image_url" in result_data:
-                    # 没有本地图片，发送 URL
-                    await event.send(f"🎨 图片链接:\n{result_data['image_url']}")
-
-                # 发送保存路径
-                save_msg = ""
-                if save_path:
-                    save_msg = f"\n📁 已保存到: {save_path}"
-                
-                return "图片生成完成，已发送给用户。" + save_msg
+                # _llm_tool_job 内部已调用 _generate_and_send 完成完整流程
+                # （视觉分析→提示词修饰→生成→保存→多重发送）
+                # 这里只需返回结果即可
+                return result_data.get("message", "图片生成完成，已发送给用户。")
             else:
                 return f"图片生成失败: {result_data.get('error', '未知错误')}"
         except asyncio.CancelledError:
-            logger.info(f"[ImageProducer] 任务 {task_id} 被取消")
-            return "图片生成任务被取消"
+            # 任务被请求取消，但我们使用 shield 保护了任务
+            # 这里只记录日志，任务本身会继续执行
+            logger.warning(f"[ImageProducer] 任务 {task_id} 收到取消请求，但任务将继续执行直到完成")
+            # 等待任务完成（不取消）
+            try:
+                result_data = await task
+                if result_data.get("success", False):
+                    return result_data.get("message", "图片生成完成，已发送给用户。")
+                else:
+                    return f"图片生成失败: {result_data.get('error', '未知错误')}"
+            except Exception as e:
+                logger.error(f"[ImageProducer] 任务执行异常: {e}", exc_info=True)
+                return f"图片生成出错: {str(e)}"
         except Exception as e:
             logger.error(f"[ImageProducer] 任务异常: {e}", exc_info=True)
             return f"图片生成出错: {str(e)}"
